@@ -910,7 +910,8 @@ app.post('/api/scorecard', async (req, res) => {
     : '';
 
   const metricsKeys = '"technical_depth":0,"problem_solving":0,"communication":0,"confidence":0,"behavioral":0,"system_design":0';
-  const prompt = `Based on this interview, generate honest detailed scorecard.${factSummary}${adaptiveInfo}\n\nReturn ONLY valid JSON:\n{"overall":0,"metrics":{${metricsKeys}},"strengths":["specific strength","another"],"improvements":["specific improvement","another"],"fatal_flaw":"critical issue or null","factual_errors":${JSON.stringify(session.factErrors)},"verdict":"Strong hire or Hire or Maybe or No hire","offer_likelihood":0,"next_step":"next step","detailed_feedback":"2-3 sentence honest assessment","adaptive_rating":${Math.round(session.adaptiveEngine?.rating || 50)},"adaptive_tier":"${session.adaptiveEngine?.getTier() || 'mid_level'}"}`;
+  const strictRule = '\nCRITICAL GRADING RULE: If the candidate provided very short, vague, or no substantive answers (effectively remaining silent), the overall score MUST be extremely low (0-20), the verdict MUST be "No hire", and all metrics must be heavily penalized. Do not invent positive attributes if the candidate did not speak substantially. Be brutal but honest.';
+  const prompt = `Based on this interview, generate an honest, detailed scorecard.${factSummary}${adaptiveInfo}${strictRule}\n\nReturn ONLY valid JSON:\n{"overall":0,"metrics":{${metricsKeys}},"strengths":["specific strength","another"],"improvements":["specific improvement","another"],"fatal_flaw":"critical issue or null","factual_errors":${JSON.stringify(session.factErrors)},"verdict":"Strong hire or Hire or Maybe or No hire","offer_likelihood":0,"next_step":"next step","detailed_feedback":"2-3 sentence honest assessment","adaptive_rating":${Math.round(session.adaptiveEngine?.rating || 50)},"adaptive_tier":"${session.adaptiveEngine?.getTier() || 'mid_level'}"}`;
 
   try {
     const response = await groqChat({
