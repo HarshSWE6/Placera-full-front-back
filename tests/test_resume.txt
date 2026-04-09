@@ -1,0 +1,9 @@
+John Doe
+B.Tech Computer Science, IIT Delhi, 2024
+Skills: Python, JavaScript, React, Node.js, Docker, AWS, MongoDB, SQL
+Projects:
+1. E-Commerce Platform: Built a full-stack e-commerce app using React, Node.js, and MongoDB with payment integration. Handled 10K concurrent users.
+2. ML Pipeline: Created an automated ML pipeline using TensorFlow for sentiment analysis of customer reviews. Achieved 92% accuracy.
+Internships:
+- Software Engineer Intern at Google, Summer 2023. Worked on distributed caching systems.
+Achievements: ACM-ICPC Regionalist, 5-star on Codeforces, Published research paper on graph algorithms.

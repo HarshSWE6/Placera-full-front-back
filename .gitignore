@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Debug/output files
+out.txt
+*.out.txt
+flow_out*.txt
+session_lines.txt
+unit_out*.txt
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+
+# Test artifacts
+coverage/
+
+# Build
+dist/
