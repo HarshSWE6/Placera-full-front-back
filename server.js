@@ -1202,17 +1202,21 @@ app.get('/api/adaptive-status/:sessionId', (req, res) => {
 // ══════════════════════════════════════════════════════════════
 // GRACEFUL SHUTDOWN
 // ══════════════════════════════════════════════════════════════
-const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => console.log(`⚡ Placera v3.1 running on http://localhost:${PORT}`));
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  const server = app.listen(PORT, () => console.log(`⚡ Placera v3.1 running on http://localhost:${PORT}`));
 
-function gracefulShutdown(signal) {
-  console.log(`\n${signal} received. Shutting down gracefully...`);
-  server.close(() => {
-    console.log('✅ Server closed. Active sessions:', Object.keys(sessions).length);
-    process.exit(0);
-  });
-  setTimeout(() => { console.error('Forced shutdown'); process.exit(1); }, 5000);
+  function gracefulShutdown(signal) {
+    console.log(`\n${signal} received. Shutting down gracefully...`);
+    server.close(() => {
+      console.log('✅ Server closed. Active sessions:', Object.keys(sessions).length);
+      process.exit(0);
+    });
+    setTimeout(() => { console.error('Forced shutdown'); process.exit(1); }, 5000);
+  }
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+module.exports = app;
