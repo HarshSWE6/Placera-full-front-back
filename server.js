@@ -408,9 +408,12 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   try {
     const client = getGroqClient();
     const { Blob } = require('buffer');
-    const audioBlob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
+    const mimeType = req.file.mimetype || 'audio/webm';
+    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    
+    const audioBlob = new Blob([req.file.buffer], { type: mimeType });
     const transcription = await client.audio.transcriptions.create({
-      file: new File([audioBlob], 'audio.webm', { type: 'audio/webm' }),
+      file: new File([audioBlob], `audio.${ext}`, { type: mimeType }),
       model: 'whisper-large-v3-turbo',
       language: 'en',
       response_format: 'json'
