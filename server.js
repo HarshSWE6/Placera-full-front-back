@@ -1320,7 +1320,8 @@ app.get('/api/adaptive-status/:sessionId', (req, res) => {
 // ══════════════════════════════════════════════════════════════
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  const server = app.listen(PORT, () => console.log(`⚡ Placera v3.1 running on http://localhost:${PORT}`));
+  const server = app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Placera v3.1 production server live on port ${PORT}`));
+
 
   function gracefulShutdown(signal) {
     console.log(`\n${signal} received. Shutting down gracefully...`);
