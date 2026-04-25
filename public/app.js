@@ -19,10 +19,11 @@ let _submitting = false; // debounce guard
 
 // ── PROCTORING STATE ──
 let tabSwitchCount = 0, tabSwitchListenerAttached = false;
-let multipleFaceCount = 0;
+let multipleFaceCount = 0, isStartingCamera = false;
 const PROCTORING_MAX_WARNINGS = 3; // 3 warnings, 4th = termination
 let proctoringGraceUntil = 0; // Timestamp: ignore violations before this
 let lastBlurTime = 0; // Cooldown: ignore rapid successive blurs
+
 const PROCTORING_COOLDOWN_MS = 3000; // 3s cooldown between counting blurs
 const PROCTORING_GRACE_MS = 5000; // 5s grace period after interview starts
 
@@ -2619,6 +2620,7 @@ async function toggleCamera() { if (cameraOn) stopCamera(); else await startCame
 
 async function startCamera() {
     try {
+        isStartingCamera = true;
         await loadFaceModels();
         stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'user' }, audio: false });
         const video = document.getElementById('studentVideo');
@@ -2626,11 +2628,15 @@ async function startCamera() {
         if (document.getElementById('camPlaceholder')) document.getElementById('camPlaceholder').style.display = 'none';
         if (document.getElementById('faceCanvas')) document.getElementById('faceCanvas').style.display = 'block';
         cameraOn = true; addLog('Camera on — proctoring active', 'good');
-        // FIX #12 & #13: Tab switch listener moved to attachProctoringListeners() — no longer here
         await new Promise(r => video.onloadedmetadata = r);
         startFaceAnalysis(video);
     } catch (err) { addLog('Camera access denied', 'warn'); }
+    finally {
+        // Give 2 extra seconds of grace after camera starts to avoid focus flicker
+        setTimeout(() => { isStartingCamera = false; }, 2000);
+    }
 }
+
 
 function stopCamera() {
     cameraOn = false; if (faceAnalysisInterval) clearInterval(faceAnalysisInterval);
@@ -2699,17 +2705,23 @@ function attachProctoringListeners() {
 
     window.addEventListener('blur', () => {
         if (!interviewActive) return;
+        // Ignore violations while camera is starting (prevents permission popup strikes)
+        if (isStartingCamera) {
+            addLog('[SECURITY] Focus change during camera startup — ignored', 'info');
+            return;
+        }
         // Grace period: ignore blurs right after interview starts
         if (Date.now() < proctoringGraceUntil) {
             addLog('[SECURITY] Focus change during grace period — ignored', 'info');
             return;
         }
-        // Cooldown: ignore rapid successive blur events (OS-level focus changes, notifications, etc.)
+        // Cooldown: ignore rapid successive blur events
         const now = Date.now();
         if (now - lastBlurTime < PROCTORING_COOLDOWN_MS) {
             addLog('[SECURITY] Rapid focus change — cooldown active, not counted', 'info');
             return;
         }
+
         lastBlurTime = now;
         tabSwitchCount++;
         addLog(`[SECURITY] Tab switch detected! (${tabSwitchCount}/${PROCTORING_MAX_WARNINGS + 1})`, 'warn');
