@@ -353,11 +353,25 @@ function stopVoiceInput() {
 async function transcribeAndSend() {
     try {
         const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        if (audioBlob.size < 1000) { resetAnswerBtn(); addLog('Too short — speak more clearly', 'warn'); return; }
+        if (audioBlob.size < 1000) {
+            resetAnswerBtn();
+            addLog('Too short — speak more clearly', 'warn');
+            showToast('🎙️ You are not audible. Please speak louder and try again.', 'warn', 5000);
+            setQText('I\'m sorry, you\'re not audible. Could you please repeat that?');
+            speakText('I\'m sorry, you\'re not audible. Could you please repeat your answer?', 'Unified', currentRound);
+            return;
+        }
         const formData = new FormData(); formData.append('audio', audioBlob, 'answer.webm');
         const res = await fetch('/api/transcribe', { method: 'POST', body: formData });
         const data = await res.json();
-        if (data.error || !data.text || data.text.trim().length < 3) { resetAnswerBtn(); addLog('Could not transcribe — try speaking louder', 'warn'); return; }
+        if (data.error || !data.text || data.text.trim().length < 3) {
+            resetAnswerBtn();
+            addLog('Could not transcribe — try speaking louder', 'warn');
+            showToast('🎙️ Your voice was not clear enough. Please speak louder or move closer to the mic.', 'warn', 5000);
+            setQText('I couldn\'t hear you clearly. Could you please repeat that?');
+            speakText('I couldn\'t hear you clearly. Could you please repeat your answer?', 'Unified', currentRound);
+            return;
+        }
         const transcribedText = data.text.trim();
         addLog('You said: "' + transcribedText.substring(0, 50) + '..."', 'good');
         resetAnswerBtn(); await sendAnswer(transcribedText);
@@ -1848,32 +1862,70 @@ function renderScorecard(data) {
         </div>`;
     }
 
-    main.innerHTML = `<div style="text-align:center; padding:48px 40px; background:white; border-radius:28px; border:1px solid #e2e8f0; box-shadow:0 8px 40px rgba(0,0,0,0.06);">
+    const verdictColors = {'Strong hire':'#16a34a','Hire':'#2563eb','Maybe':'#d97706','No hire':'#dc2626'};
+    const vc = verdictColors[data.verdict] || '#2563eb';
+    const metricsHtml = Object.entries(metrics).map(([key,val]) => {
+        const c = val>80?'#16a34a':val>60?'#2563eb':'#d97706';
+        return `<div style="padding:20px; border-radius:16px; background:#f8fafc; border:1px solid #e2e8f0; transition:transform 0.2s; cursor:default;" onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                <span style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#94a3b8; letter-spacing:1.5px; text-transform:uppercase;">${key.replace(/_/g,' ')}</span>
+                <span style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${c};">${val}%</span>
+            </div>
+            <div style="height:6px; border-radius:3px; background:#e2e8f0; overflow:hidden;">
+                <div style="height:100%; border-radius:3px; width:${val}%; background:linear-gradient(90deg, ${c}, ${c}cc); transition:width 1.2s ease;"></div>
+            </div>
+        </div>`;
+    }).join('');
+
+    main.innerHTML = `
+    <!-- Hero Score Card -->
+    <div style="text-align:center; padding:48px 40px; background:linear-gradient(135deg, #ffffff 0%, #f8fafc 100%); border-radius:28px; border:1px solid #e2e8f0; box-shadow:0 8px 40px rgba(0,0,0,0.06); position:relative; overflow:hidden;">
+        <div style="position:absolute; top:0; left:0; right:0; height:4px; background:linear-gradient(90deg, ${vc}, #7c3aed, #2563eb);"></div>
         <div style="font-family:var(--font-mono); font-size:10px; color:#2563eb; font-weight:700; letter-spacing:4px; margin-bottom:20px;">FINAL EVALUATION REPORT</div>
         <div style="width:60px; height:3px; background:linear-gradient(90deg, #2563eb, #7c3aed); margin:0 auto 24px; border-radius:2px;"></div>
-        <div style="font-family:var(--font-display); font-size:96px; font-weight:900; background:linear-gradient(180deg, #0f172a 30%, #2563eb 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; line-height:1;">${avg}<span style="font-size:32px; opacity:0.3; -webkit-text-fill-color:#94a3b8; margin-left:4px;">/100</span></div>
-        <p style="color:#64748b; font-size:18px; margin-top:16px;">${data.verdict || 'Assessment complete'}</p>
-        ${data.adaptive_rating ? `<div style="display:inline-flex; align-items:center; gap:8px; margin:20px auto; padding:8px 20px; border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe; font-family:var(--font-mono); font-size:12px; color:#4f46e5; font-weight:700;"><div style="width:8px; height:8px; border-radius:50%; background:#4f46e5; animation:pulse 2s infinite;"></div>Final ELO: ${data.adaptive_rating} · ${(data.adaptive_tier||'').replace(/_/g,' ').toUpperCase()}</div>` : ''}
-        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin:48px 0;">
-        ${Object.entries(metrics).map(([key,val]) => { const c = val>80 ? '#16a34a' : val>60 ? '#2563eb' : '#d97706'; return `<div style="padding:24px; border-radius:20px; background:#f8fafc; border:1px solid #e2e8f0;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;"><span style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#94a3b8; letter-spacing:1.5px; text-transform:uppercase;">${key.replace(/_/g,' ')}</span><span style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${c};">${val}%</span></div><div style="height:6px; border-radius:3px; background:#e2e8f0; overflow:hidden;"><div style="height:100%; border-radius:3px; width:${val}%; background:${c}; transition:width 1s ease;"></div></div></div>`; }).join('')}
+        <div style="font-family:var(--font-display); font-size:96px; font-weight:900; background:linear-gradient(180deg, #0f172a 30%, ${vc} 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; line-height:1;">${avg}<span style="font-size:32px; opacity:0.3; -webkit-text-fill-color:#94a3b8; margin-left:4px;">/100</span></div>
+        <div style="display:inline-block; margin-top:16px; padding:8px 24px; border-radius:999px; background:${vc}15; border:1px solid ${vc}30;">
+            <span style="font-family:var(--font-display); font-size:18px; font-weight:700; color:${vc};">${data.verdict || 'Assessment complete'}</span>
         </div>
-        ${starHtml}
-        ${strengths ? `<div style="padding:32px; border-radius:20px; background:white; border:1px solid #dcfce7; text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#16a34a; letter-spacing:1.5px; margin-bottom:12px;">STRENGTHS</div><ul style="list-style:none; padding:0;">${strengths}</ul></div>` : ''}
-        ${improvements ? `<div style="padding:32px; border-radius:20px; background:white; border:1px solid #fde68a; text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#d97706; letter-spacing:1.5px; margin-bottom:12px;">AREAS FOR IMPROVEMENT</div><ul style="list-style:none; padding:0;">${improvements}</ul></div>` : ''}
-        ${fatalFlaw}
-        ${data.detailed_feedback ? `<div style="padding:40px; border-radius:28px; background:#f8fafc; border:1px solid #e2e8f0; text-align:left; margin-bottom:48px;"><div style="font-family:var(--font-display); font-size:18px; font-weight:700; color:#0f172a; margin-bottom:16px;">Executive Summary</div><p style="color:#475569; line-height:1.8; font-size:15px;">${data.detailed_feedback}</p></div>` : ''}
-        <div style="display:flex; gap:16px; justify-content:center; flex-wrap:wrap;">
-            <button onclick="generatePDFReport()" style="padding:14px 40px; font-weight:700; background:linear-gradient(135deg, #2563eb, #4f46e5); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px;">
-                <span class="material-symbols-outlined" style="font-size:18px;">picture_as_pdf</span>
-                Download PDF Report
-            </button>
-            <button onclick="shareResults()" style="padding:14px 32px; font-weight:700; background:linear-gradient(135deg, #16a34a, #059669); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px;">
-                <span class="material-symbols-outlined" style="font-size:18px;">share</span>
-                Share Results
-            </button>
-            <button onclick="showScreen('selectorScreen')" style="padding:14px 32px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px;">New Mode</button>
-            <button onclick="window.location.reload()" style="padding:14px 32px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px;">Fresh Start</button>
-        </div>
+        ${data.adaptive_rating ? `<div style="display:inline-flex; align-items:center; gap:8px; margin:20px auto; padding:8px 20px; border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe; font-family:var(--font-mono); font-size:12px; color:#4f46e5; font-weight:700;"><div style="width:8px; height:8px; border-radius:50%; background:#4f46e5;"></div>Final ELO: ${data.adaptive_rating} · ${(data.adaptive_tier||'').replace(/_/g,' ').toUpperCase()}</div>` : ''}
+        
+        <!-- Metrics Grid -->
+        <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin:40px 0;">${metricsHtml}</div>
+    </div>
+
+    <!-- STAR Analysis -->
+    ${starHtml}
+
+    <!-- Strengths -->
+    ${strengths ? `<div style="padding:28px 32px; border-radius:20px; background:linear-gradient(135deg, #f0fdf4 0%, #ffffff 100%); border:1px solid #bbf7d0; text-align:left; margin-top:20px;">
+        <div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#16a34a; letter-spacing:1.5px; margin-bottom:12px;">✦ STRENGTHS</div>
+        <ul style="list-style:none; padding:0;">${strengths}</ul>
+    </div>` : ''}
+
+    <!-- Improvements -->
+    ${improvements ? `<div style="padding:28px 32px; border-radius:20px; background:linear-gradient(135deg, #fffbeb 0%, #ffffff 100%); border:1px solid #fde68a; text-align:left; margin-top:20px;">
+        <div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#d97706; letter-spacing:1.5px; margin-bottom:12px;">↗ AREAS FOR IMPROVEMENT</div>
+        <ul style="list-style:none; padding:0;">${improvements}</ul>
+    </div>` : ''}
+
+    ${fatalFlaw}
+
+    <!-- Executive Summary -->
+    ${data.detailed_feedback ? `<div style="padding:36px; border-radius:24px; background:linear-gradient(135deg, #f8fafc, #eef2ff); border:1px solid #e2e8f0; text-align:left; margin-top:20px;">
+        <div style="font-family:var(--font-display); font-size:18px; font-weight:700; color:#0f172a; margin-bottom:16px;">Executive Summary</div>
+        <p style="color:#475569; line-height:1.8; font-size:15px;">${data.detailed_feedback}</p>
+    </div>` : ''}
+
+    <!-- Action Buttons -->
+    <div style="display:flex; gap:14px; justify-content:center; flex-wrap:wrap; margin-top:32px;">
+        <button onclick="generatePDFReport()" style="padding:14px 36px; font-weight:700; background:linear-gradient(135deg, #2563eb, #4f46e5); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px; box-shadow:0 4px 16px rgba(37,99,235,0.3); transition:transform 0.2s;" onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">
+            <span class="material-symbols-outlined" style="font-size:18px;">picture_as_pdf</span>Download PDF Report
+        </button>
+        <button onclick="shareResults()" style="padding:14px 28px; font-weight:700; background:linear-gradient(135deg, #16a34a, #059669); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px; box-shadow:0 4px 16px rgba(22,163,74,0.3); transition:transform 0.2s;" onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">
+            <span class="material-symbols-outlined" style="font-size:18px;">share</span>Share
+        </button>
+        <button onclick="showScreen('selectorScreen')" style="padding:14px 28px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px; transition:transform 0.2s;" onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">New Mode</button>
+        <button onclick="window.location.reload()" style="padding:14px 28px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px; transition:transform 0.2s;" onmouseenter="this.style.transform='translateY(-2px)'" onmouseleave="this.style.transform=''">Fresh Start</button>
     </div>`;
 }
 
