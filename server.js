@@ -43,15 +43,11 @@ if (!process.env.ELEVENLABS_VOICE_ID) {
 const app = express();
 
 // ── SECURITY MIDDLEWARE ──
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  frameguard: false, // Allows opening inside other apps/frames
-}));
-app.use(cors({
-  origin: '*', // Fully permissive for mobile/app testing
-  methods: ['GET', 'POST'],
-}));
+app.use(cors()); // Allow everything
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+// Helmet disabled for maximum compatibility during launch
+
 
 
 // ── RATE LIMITING ──
