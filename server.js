@@ -44,13 +44,15 @@ const app = express();
 
 // ── SECURITY MIDDLEWARE ──
 app.use(helmet({
-  contentSecurityPolicy: false, // Allow CDN scripts in frontend
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
+  frameguard: false, // Allows opening inside other apps/frames
 }));
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*',
+  origin: '*', // Fully permissive for mobile/app testing
   methods: ['GET', 'POST'],
 }));
+
 
 // ── RATE LIMITING ──
 const apiLimiter = rateLimit({
