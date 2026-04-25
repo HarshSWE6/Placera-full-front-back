@@ -1,1 +1,20 @@
-This is a test resume content for Harsha-vardhan.
+Harsh Vardhan Singh
+B.Tech Computer Science, NIT Trichy, 2025
+Email: harsh@example.com | Phone: +91-9876543210 | LinkedIn: linkedin.com/in/harsh | GitHub: github.com/harsh
+
+OBJECTIVE: Seeking a challenging software engineering role to leverage my skills in full-stack development and AI/ML.
+
+EDUCATION:
+- B.Tech in Computer Science, NIT Trichy (2021-2025), CGPA: 8.7/10
+
+TECHNICAL SKILLS:
+Python, JavaScript, TypeScript, React, Node.js, Express, MongoDB, PostgreSQL, Docker, AWS, TensorFlow, PyTorch, Git, Redis, GraphQL
+
+PROJECTS:
+1. AI Interview Platform (Placera): Built AI-powered interview platform with adaptive difficulty, real-time proctoring, and comprehensive performance analytics. Tech: Node.js, Express, ElevenLabs, Groq API.
+2. E-Commerce Microservices: Designed and deployed microservices architecture handling 50K daily users. Tech: React, Node.js, MongoDB, Docker, Kubernetes, Redis.
+3. ML Sentiment Analyzer: Created NLP pipeline achieving 94% accuracy on IMDB dataset. Tech: Python, TensorFlow, BERT, FastAPI.
+
+EXPERIENCE:
+- SDE Intern at TechCorp (Summer 2024): Optimized backend queries by 40% using Redis caching and PostgreSQL indexing.
+- Open Source Contributor: Fixed bugs in popular Node.js frameworks.

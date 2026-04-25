@@ -19,8 +19,22 @@ let _submitting = false; // debounce guard
 
 // ── PROCTORING STATE ──
 let tabSwitchCount = 0, tabSwitchListenerAttached = false;
-let multipleFaceCount = 0, lastMultipleFaceTime = 0;
-const PROCTORING_MAX_WARNINGS = 2; // 2 warnings, 3rd = termination
+let multipleFaceCount = 0;
+const PROCTORING_MAX_WARNINGS = 3; // 3 warnings, 4th = termination
+let proctoringGraceUntil = 0; // Timestamp: ignore violations before this
+let lastBlurTime = 0; // Cooldown: ignore rapid successive blurs
+const PROCTORING_COOLDOWN_MS = 3000; // 3s cooldown between counting blurs
+const PROCTORING_GRACE_MS = 5000; // 5s grace period after interview starts
+
+// ── CODE PASTE DETECTION STATE ──
+let pasteEvents = []; // Array of { timestamp, charCount, content }
+let totalPastedChars = 0;
+let totalTypedChars = 0;
+let lastEditorLength = 0;
+let pasteWarningCount = 0;
+const PASTE_THRESHOLD = 30; // Chars pasted at once to trigger detection
+const PASTE_MAX_WARNINGS = 2; // Max warnings before flagging
+let editorKeystrokeCount = 0;
 
 // ── DSA CHALLENGE STATE ──
 let currentDSAQuestion = null; // Parsed DSA question object
@@ -164,6 +178,13 @@ function updateEloDisplay(rating, tier) {
 function showScreen(id) {
     document.querySelectorAll('.screen').forEach(s => { s.classList.remove('active'); s.style.display = 'none'; });
     const s = document.getElementById(id); if (s) { s.style.display = 'flex'; s.classList.add('active'); }
+    
+    // Toggle light mode for specific screens
+    if (['uploadScreen', 'selectorScreen', 'scorecardScreen'].includes(id)) {
+        document.body.classList.add('light-mode');
+    } else {
+        document.body.classList.remove('light-mode');
+    }
 }
 
 // ── RESUME FILE VALIDATION ──
@@ -172,11 +193,11 @@ function isValidResumeFile(file) {
         'application/pdf',
         'text/plain',
     ];
-    const allowedExtensions = ['.pdf', '.txt'];
+    const allowedExtensions = ['.pdf', '.docx', '.doc', '.txt'];
     const blockedExtensions = [
         '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.webp', '.ico',
         '.mp4', '.avi', '.mov', '.mkv', '.webm', '.mp3', '.wav', '.ogg',
-        '.xlsx', '.xls', '.csv', '.pptx', '.ppt', '.docx', '.doc',
+        '.xlsx', '.xls', '.csv', '.pptx', '.ppt',
         '.zip', '.rar', '.7z', '.tar', '.gz',
         '.exe', '.msi', '.bat', '.sh', '.py', '.js', '.html', '.css',
         '.json', '.xml', '.yaml', '.yml',
@@ -227,8 +248,20 @@ async function handleFileSelect(input) {
         }
         sessionId = data.sessionId; primaryLanguage = data.resumeData.primary_language || 'Python';
         status.textContent = `✓ Resume verified — ${(data.resumeData.projects || []).length} projects, ${(data.resumeData.skills || []).length} skills detected`;
-        status.style.color = 'var(--green)'; renderResumePreview(data.resumeData); document.getElementById('resumePreview').style.display = 'block';
-    } catch (err) { status.textContent = '✗ Upload failed. Check your connection.'; status.style.color = 'var(--red)'; showToast('Upload failed. Please try again.', 'error'); input.value = ''; }
+        status.style.color = 'var(--green)'; 
+        renderResumePreview(data.resumeData); 
+        const preview = document.getElementById('resumePreview');
+        preview.style.display = 'block';
+        preview.classList.remove('hidden');
+        // Auto-scroll to preview so the user sees the "Continue" button
+        preview.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } catch (err) { 
+        console.error(err);
+        status.textContent = '✗ Upload failed. Check your connection.'; 
+        status.style.color = 'var(--red)'; 
+        showToast('Upload failed. Please try again.', 'error'); 
+        input.value = ''; 
+    }
 }
 
 function renderResumePreview(rd) {
@@ -395,7 +428,54 @@ function initEditor(retryCount) {
         editorInitialized = true;
         // Force multiple resize passes for reliability
         [100, 300, 600].forEach(ms => setTimeout(() => { if (editor) editor.resize(); }, ms));
-        addLog('[EDITOR] Code editor initialized', 'good');
+
+        // ── ANTI-PASTE DETECTION ──
+        // Track paste events via Ace's built-in paste handler
+        editor.on('paste', function(pasteData) {
+            const pastedText = pasteData.text || '';
+            const charCount = pastedText.length;
+            if (charCount >= PASTE_THRESHOLD) {
+                pasteWarningCount++;
+                totalPastedChars += charCount;
+                pasteEvents.push({
+                    timestamp: Date.now(),
+                    charCount,
+                    preview: pastedText.substring(0, 80).replace(/\n/g, ' '),
+                    warning: pasteWarningCount
+                });
+                addLog(`[PROCTOR] Large paste detected: ${charCount} chars (warning ${pasteWarningCount}/${PASTE_MAX_WARNINGS})`, 'warn');
+
+                if (pasteWarningCount <= PASTE_MAX_WARNINGS) {
+                    showToast(
+                        `⚠️ Paste detected (${charCount} chars). Your code originality is being tracked. Warning ${pasteWarningCount}/${PASTE_MAX_WARNINGS}.`,
+                        pasteWarningCount === 1 ? 'warn' : 'error', 7000
+                    );
+                    showProctoringWarningBanner(`CODE PASTE DETECTED — ${charCount} chars — Warning ${pasteWarningCount}/${PASTE_MAX_WARNINGS}`);
+                } else {
+                    showToast(
+                        '🚨 Multiple large pastes detected. Your submission will be flagged for review. The AI interviewer has been notified.',
+                        'error', 10000
+                    );
+                    showProctoringWarningBanner('⚠️ CODE FLAGGED — Multiple paste violations detected');
+                }
+            } else if (charCount > 5) {
+                // Small pastes (autocomplete, snippets) — just track silently
+                totalPastedChars += charCount;
+            }
+        });
+
+        // Track keystrokes to build typing/paste ratio
+        editor.on('input', function() {
+            editorKeystrokeCount++;
+            const currentLen = editor.getValue().length;
+            const delta = currentLen - lastEditorLength;
+            if (delta > 0 && delta <= 3) {
+                totalTypedChars += delta; // Likely typed
+            }
+            lastEditorLength = currentLen;
+        });
+
+        addLog('[EDITOR] Code editor initialized with paste detection', 'good');
     } catch (e) {
         console.error('Editor init error:', e);
         if (retry < 5) {
@@ -466,7 +546,7 @@ async function executeCode(code, lang, isSubmit = false) {
         resultsEl.innerHTML = `<div style="padding:24px; text-align:center; color:var(--t3); font-family:var(--font-mono); font-size:12px;">
             <div class="loading-spinner" style="margin:0 auto 12px;"></div>
             ${isSubmit ? 'AI is evaluating your solution against all test cases...' : 'AI is analyzing your code...'}
-            <div style="font-size:10px; color:var(--t5); margin-top:8px;">Powered by Gemini AI evaluation engine</div>
+            <div style="font-size:10px; color:var(--t5); margin-top:8px;">Powered by Groq & ElevenLabs Intelligence</div>
         </div>`;
     }
 
@@ -786,11 +866,31 @@ function submitCode() {
         showToast('Write your solution before submitting', 'warn');
         return;
     }
+    // Calculate paste vs type ratio
+    const totalChars = code.length;
+    const pasteRatio = totalChars > 0 ? Math.round((totalPastedChars / Math.max(totalChars, 1)) * 100) : 0;
+    const isPasteHeavy = pasteRatio > 60 || pasteWarningCount > PASTE_MAX_WARNINGS;
+    const pasteMetrics = {
+        pasteEvents: pasteEvents.length,
+        totalPastedChars,
+        totalTypedChars,
+        pasteRatio,
+        keystrokes: editorKeystrokeCount,
+        flagged: isPasteHeavy
+    };
+    // Build submission message with paste metadata
+    let submissionMsg = `I have submitted my solution in ${lang}. Here is my code:\n\n${code}`;
+    if (isPasteHeavy) {
+        submissionMsg += `\n\n[PASTE_ALERT: ${pasteRatio}% of code appears pasted (${pasteEvents.length} paste events, ${totalPastedChars} chars pasted vs ${totalTypedChars} typed). This submission has been flagged for originality review.]`;
+        addLog(`[PROCTOR] Code flagged: ${pasteRatio}% paste ratio, ${pasteEvents.length} paste events`, 'warn');
+    } else if (pasteEvents.length > 0) {
+        submissionMsg += `\n\n[PASTE_INFO: ${pasteEvents.length} paste event(s) detected, ${pasteRatio}% paste ratio. Within acceptable range.]`;
+    }
     // Run with hidden tests included
     executeCode(code, lang, true).then(() => {
-        addLog('[CODE] Submitted ' + lang + ' solution (' + code.split('\n').length + ' lines)', 'good');
+        addLog(`[CODE] Submitted ${lang} solution (${code.split('\n').length} lines, paste ratio: ${pasteRatio}%)`, 'good');
         showToast('Code submitted — evaluating with hidden tests', 'success');
-        sendAnswer(`I have submitted my solution in ${lang}. Here is my code:\n\n${code}`);
+        sendAnswer(submissionMsg);
     });
 }
 
@@ -1322,6 +1422,14 @@ function detectAndShowDSA(questionText, isCodingChallenge) {
         showDSAModal(parsed);
         dsaChallengeShown = true;
         
+        // Reset paste detection for new question
+        pasteEvents = [];
+        totalPastedChars = 0;
+        totalTypedChars = 0;
+        pasteWarningCount = 0;
+        editorKeystrokeCount = 0;
+        lastEditorLength = 0;
+        
         // AUTO-SYNC: Immediately set up editor + test cases for this question
         autoSetupDSAEditor(parsed);
     }
@@ -1417,9 +1525,19 @@ function startWithMode(mode) {
     const roundLabels = { 'tech-only': 'Technical Interview', 'hr-only': 'HR Interview' };
     const chipRound = document.getElementById('chipRound'); if (chipRound) chipRound.textContent = roundLabels[mode] || 'Interview';
 
+    // ── FULLSCREEN MODE ──
+    try {
+        const el = document.documentElement;
+        if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+        else if (el.msRequestFullscreen) el.msRequestFullscreen();
+    } catch(e) { /* fullscreen not supported — continue anyway */ }
+
     // ── DYNAMIC INTERVIEWER PERSONA ──
     const isHRMode = (mode === 'hr-only');
     currentInterviewer = isHRMode ? 'AMARA' : 'DAVID';
+    const introEl = document.getElementById('interviewerIntro');
+    if (introEl) introEl.textContent = isHRMode ? 'Your AI HR interviewer · STAR behavioral analysis' : 'Your AI tech interviewer · Adapts to your level';
     const nameEl = document.getElementById('interviewerName');
     if (nameEl) nameEl.textContent = currentInterviewer;
     const statusEl = document.querySelector('.av-status');
@@ -1441,8 +1559,36 @@ function startWithMode(mode) {
     attachProctoringListeners();
 
     showScreen('interviewScreen');
-    startRound(currentRound);
+    startCountdownThenRound(currentRound);
 }
+
+function startCountdownThenRound(round) {
+    const overlay = document.createElement('div');
+    overlay.id = 'countdownOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(6,8,14,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;backdrop-filter:blur(12px);';
+    const modeLabel = currentMode === 'hr-only' ? 'HR Interview' : 'Technical Interview';
+    const modeColor = currentMode === 'hr-only' ? '#ec4899' : '#6366f1';
+    const dots = Array.from({length:10},(_,i) => `<div id="cdDot${10-i}" style="width:8px;height:8px;border-radius:50%;background:${modeColor};opacity:1;transition:opacity 0.3s;display:inline-block;margin:0 3px;"></div>`).join('');
+    overlay.innerHTML = `<div style="text-align:center;"><div style="font-family:'Outfit',sans-serif;font-size:13px;font-weight:700;letter-spacing:3px;color:${modeColor};text-transform:uppercase;margin-bottom:24px;">${modeLabel} &middot; Starting In</div><div id="cdNumber" style="font-family:'Outfit',sans-serif;font-size:120px;font-weight:900;line-height:1;background:linear-gradient(135deg,#3b82f6,${modeColor});-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;transition:transform 0.15s,opacity 0.15s;">10</div><div style="margin-top:28px;">${dots}</div><div style="margin-top:24px;font-family:'Outfit',sans-serif;font-size:14px;color:rgba(255,255,255,0.4);">Take a deep breath. You've got this.</div></div>`;
+    document.body.appendChild(overlay);
+    let count = 10;
+    const cdNum = document.getElementById('cdNumber');
+    const tick = setInterval(() => {
+        const dot = document.getElementById('cdDot' + (count));
+        if (dot) dot.style.opacity = '0.15';
+        count--;
+        if (count <= 0) {
+            clearInterval(tick);
+            overlay.style.opacity = '0';
+            overlay.style.transition = 'opacity 0.4s';
+            setTimeout(() => { overlay.remove(); startRound(round); }, 400);
+            return;
+        }
+        cdNum.style.transform = 'scale(0.6)'; cdNum.style.opacity = '0';
+        setTimeout(() => { cdNum.textContent = count; cdNum.style.transform = 'scale(1)'; cdNum.style.opacity = '1'; }, 150);
+    }, 1000);
+}
+
 
 async function startRound(round) {
     currentRound = round; questionCount = 0; interviewActive = false;
@@ -1451,24 +1597,43 @@ async function startRound(round) {
         const res = await fetch('/api/start-round', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId, company: 'Unified', round, mode: currentMode }) });
         const data = await res.json(); if (data.error) throw new Error(data.error);
         sessionId = data.sessionId; maxQuestions = data.maxQuestions;
-        // Update interviewer name from server response
         if (data.interviewerName) {
             currentInterviewer = data.interviewerName.toUpperCase();
             const nameEl = document.getElementById('interviewerName');
             if (nameEl) nameEl.textContent = currentInterviewer;
         }
-        // Camera NOT auto-started — user must click to enable
         setQText(data.question); updateDots(1, maxQuestions); interviewActive = true;
         if (data.adaptiveRating) updateEloDisplay(data.adaptiveRating, data.adaptiveTier);
         speakText(data.question, 'Unified', round);
-        saveSessionState();
+        saveSessionState(data.question, data.adaptiveRating, data.adaptiveTier);
         showToast('Interview started! Good luck.', 'success');
     } catch (err) { console.error("StartRound Error:", err); setQText('Connection failed — please restart server'); showToast('Connection failed. Is the server running?', 'error'); }
+}
+
+function saveSessionState(lastQuestion, adaptiveRating, adaptiveTier) {
+    try {
+        sessionStorage.setItem('placera_active_session', JSON.stringify({
+            sessionId, currentMode, currentRound, maxQuestions,
+            questionCount, interviewActive: true,
+            lastQuestion: lastQuestion || document.getElementById('qtext')?.textContent || '',
+            adaptiveRating: adaptiveRating || null,
+            adaptiveTier: adaptiveTier || null,
+            savedAt: Date.now()
+        }));
+    } catch(e) { /* storage full */ }
+}
+
+function clearSavedSession() {
+    sessionStorage.removeItem('placera_active_session');
+    sessionStorage.removeItem('placera_reload_warns');
 }
 
 async function sendAnswer(answer, dontKnow = false, codeSubmission = null, codeLang = null) {
     if (!interviewActive || _submitting) return;
     _submitting = true;
+    // FIX: Capture the CURRENT question BEFORE the API call returns the NEXT question
+    // This ensures STAR analysis evaluates the answer against the correct question
+    const currentQuestionText = document.getElementById('qText')?.textContent || '';
     if (answer && !dontKnow && !codeSubmission) addLog(answer, 'user', 'Me');
     if (codeSubmission) addLog('Submitted code solution', 'user', 'Me');
     if (dontKnow) addLog("I'm not sure about this one.", 'user', 'Me');
@@ -1480,6 +1645,7 @@ async function sendAnswer(answer, dontKnow = false, codeSubmission = null, codeL
         if (data.adaptiveRating) updateEloDisplay(data.adaptiveRating, data.adaptiveTier);
         if (data.end) { setQText(data.question); interviewActive = false; speakText(data.question, 'Unified', currentRound); clearSavedSession(); setTimeout(() => endInterview(), 3500); _submitting = false; return; }
         questionCount = data.questionCount; setQText(data.question); updateDots(questionCount, maxQuestions);
+        saveSessionState(data.question, data.adaptiveRating, data.adaptiveTier);
         // ── DSA Challenge Detection & Modal ──
         // ONLY show DSA modal for DSA coding challenges — NOT system design, NOT HR
         if (currentMode !== 'hr-only') {
@@ -1514,14 +1680,19 @@ async function sendAnswer(answer, dontKnow = false, codeSubmission = null, codeL
         }
         speakText(data.question, 'Unified', currentRound);
         // FIX #6 & #16: Lower STAR threshold to 10 chars for short voice transcriptions
-        if ((currentMode === 'hr-only' || currentRound === 2) && answer && answer.length > 10) runStarAnalysis(answer, data.question);
+        // FIX: Use currentQuestionText (captured BEFORE API call) — not data.question (which is the NEXT question)
+        if ((currentMode === 'hr-only' || currentRound === 2) && answer && answer.length > 10) runStarAnalysis(answer, currentQuestionText);
         // FIX #8 & #15: Lower updateMetrics threshold — score all answers > 2 chars
         if (answer && answer.length > 2) {
             const metricType = (currentMode === 'hr-only') ? 'behavioral' : (data.codingType || 'general');
             updateMetrics(answer, metricType);
         }
         saveSessionState();
-    } catch (err) { addLog('Error sending answer', 'warn'); showToast('Network error. Please try again.', 'error'); }
+    } catch (err) {
+        console.error('Answer submission error:', err);
+        addLog('Error sending answer: ' + err.message, 'warn');
+        showToast('⚠️ Connection issue — your answer may not have been received. Please try again or check your internet.', 'error', 7000);
+    }
     _submitting = false;
 }
 
@@ -1560,13 +1731,30 @@ function endInterview() {
 }
 async function _doEndInterview() {
     stopTimer(); interviewActive = false; clearSavedSession();
+    // Exit fullscreen
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch(e) {}
     setQText('Generating your scorecard...'); showToast('Generating scorecard...', 'info');
     try {
         const res = await fetch('/api/scorecard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId }) });
         const sc = await res.json();
         if (sc.error) { showToast(sc.error, 'error'); return; }
         renderScorecard(sc); showScreen('scorecardScreen');
-    } catch(e) { showToast('Failed to generate scorecard', 'error'); }
+    } catch(e) {
+        console.error('Scorecard error:', e);
+        showToast('Could not generate scorecard right now. Please check your connection and try again.', 'error', 8000);
+        // Show a fallback message instead of a broken screen
+        const main = document.getElementById('scorecardMain');
+        if (main) main.innerHTML = `<div style="text-align:center; padding:80px 40px; background:white; border-radius:24px; border:1px solid #e2e8f0; box-shadow:0 4px 24px rgba(0,0,0,0.06);">
+            <span class="material-symbols-outlined" style="font-size:64px; color:#f59e0b; opacity:0.6;">cloud_off</span>
+            <div style="font-family:var(--font-display); font-size:24px; font-weight:800; color:#0f172a; margin-top:24px;">Connection Issue</div>
+            <p style="color:#64748b; font-size:14px; margin-top:12px; line-height:1.6;">We couldn't generate your scorecard. This usually means the AI service is temporarily unavailable.</p>
+            <div style="display:flex; gap:16px; justify-content:center; margin-top:32px;">
+                <button onclick="_doEndInterview()" style="padding:14px 32px; background:#2563eb; color:white; border:none; border-radius:12px; font-weight:700; cursor:pointer; font-size:14px;">Retry</button>
+                <button onclick="window.location.reload()" style="padding:14px 32px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:12px; font-weight:600; cursor:pointer; font-size:14px;">Start Over</button>
+            </div>
+        </div>`;
+        showScreen('scorecardScreen');
+    }
 }
 
 function renderScorecard(data) {
@@ -1574,29 +1762,116 @@ function renderScorecard(data) {
     window._lastScorecard = data;
     const main = document.getElementById('scorecardMain'); if (!main) return;
     const avg = data.overall || 0; const metrics = data.metrics || {};
-    const strengths = (data.strengths || []).map(s => `<li style="color:var(--green); margin:6px 0; font-size:14px;">✓ ${s}</li>`).join('');
-    const improvements = (data.improvements || []).map(s => `<li style="color:var(--amber); margin:6px 0; font-size:14px;">→ ${s}</li>`).join('');
-    const fatalFlaw = data.fatal_flaw && data.fatal_flaw !== 'null' ? `<div style="padding:16px 24px; border-radius:14px; background:rgba(239,68,68,0.06); border:1px solid rgba(239,68,68,0.15); margin:24px 0; text-align:left;"><span style="font-family:var(--font-mono); font-size:10px; color:var(--red); font-weight:700; letter-spacing:1.5px;">⚠ CRITICAL CONCERN</span><p style="color:var(--t1); font-size:14px; margin-top:8px;">${data.fatal_flaw}</p></div>` : '';
-    main.innerHTML = `<div class="sc-card">
-        <div style="font-family:var(--font-mono); font-size:10px; color:var(--accent-light); font-weight:700; letter-spacing:4px; margin-bottom:20px;">FINAL EVALUATION REPORT</div>
-        <div class="glow-line"></div>
-        <div style="font-family:var(--font-display); font-size:96px; font-weight:900; background:linear-gradient(180deg, #fff 30%, var(--accent-bright,#a5b4fc) 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; line-height:1;">${avg}<span style="font-size:32px; opacity:0.3; -webkit-text-fill-color:var(--t4); margin-left:4px;">/100</span></div>
-        <p style="color:var(--t2); font-size:18px; margin-top:16px;">${data.verdict || 'Assessment complete'}</p>
-        ${data.adaptive_rating ? `<div class="elo-badge" style="margin:20px auto;"><div class="elo-dot"></div>Final ELO: ${data.adaptive_rating} · ${(data.adaptive_tier||'').replace(/_/g,' ').toUpperCase()}</div>` : ''}
+    const strengths = (data.strengths || []).map(s => `<li style="color:#16a34a; margin:8px 0; font-size:14px; line-height:1.5;">✓ ${s}</li>`).join('');
+    const improvements = (data.improvements || []).map(s => `<li style="color:#d97706; margin:8px 0; font-size:14px; line-height:1.5;">→ ${s}</li>`).join('');
+    const fatalFlaw = data.fatal_flaw && data.fatal_flaw !== 'null' ? `<div style="padding:16px 24px; border-radius:14px; background:#fef2f2; border:1px solid #fecaca; margin:24px 0; text-align:left;"><span style="font-family:var(--font-mono); font-size:10px; color:#dc2626; font-weight:700; letter-spacing:1.5px;">⚠ CRITICAL CONCERN</span><p style="color:#1e293b; font-size:14px; margin-top:8px;">${data.fatal_flaw}</p></div>` : '';
+
+    // ── STAR ANALYSIS SECTION ──
+    let starHtml = '';
+    const starScores = data.starScores || [];
+    if (starScores.length > 0) {
+        const avgTotal = Math.round(starScores.reduce((s, x) => s + (x.total_score || 0), 0) / starScores.length);
+        const avgGrade = starScores.map(x => x.star_grade || '?').filter(g => g !== '?');
+        const dominantGrade = avgGrade.length > 0 ? avgGrade.sort((a,b) => avgGrade.filter(v => v===a).length - avgGrade.filter(v => v===b).length).pop() : '—';
+        const gradeColors = {'A':'#34d399','B':'#2f81f7','C':'#fbbf24','D':'#f97316','F':'#f87171'};
+        const gc = gradeColors[dominantGrade] || '#a78bfa';
+        const avgS = Math.round(starScores.reduce((s,x) => s + (x.situation?.score||0), 0) / starScores.length);
+        const avgT = Math.round(starScores.reduce((s,x) => s + (x.task?.score||0), 0) / starScores.length);
+        const avgA = Math.round(starScores.reduce((s,x) => s + (x.action?.score||0), 0) / starScores.length);
+        const avgR = Math.round(starScores.reduce((s,x) => s + (x.result?.score||0), 0) / starScores.length);
+        const starAssess = data.star_assessment || {};
+
+        starHtml = `<div style="padding:32px; border-radius:20px; background:white; border:1px solid #e2e8f0; box-shadow:0 2px 12px rgba(0,0,0,0.04); text-align:left; margin-bottom:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;">
+                <div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#7c3aed; letter-spacing:1.5px;">STAR BEHAVIORAL ANALYSIS</div>
+                <div style="display:flex; align-items:center; gap:12px;">
+                    <span style="font-family:var(--font-display); font-size:28px; font-weight:900; color:${gc};">${dominantGrade}</span>
+                    <span style="font-family:var(--font-mono); font-size:12px; color:#94a3b8;">${avgTotal}/100</span>
+                </div>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-bottom:16px;">
+                <div style="text-align:center; padding:14px 8px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0;">
+                    <div style="font-family:var(--font-mono); font-size:9px; color:#94a3b8; font-weight:700; letter-spacing:1px; margin-bottom:6px;">SITUATION</div>
+                    <div style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${avgS>=15?'#16a34a':avgS>=10?'#d97706':'#dc2626'};">${avgS}<span style="font-size:11px; color:#94a3b8;">/20</span></div>
+                </div>
+                <div style="text-align:center; padding:14px 8px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0;">
+                    <div style="font-family:var(--font-mono); font-size:9px; color:#94a3b8; font-weight:700; letter-spacing:1px; margin-bottom:6px;">TASK</div>
+                    <div style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${avgT>=15?'#16a34a':avgT>=10?'#d97706':'#dc2626'};">${avgT}<span style="font-size:11px; color:#94a3b8;">/20</span></div>
+                </div>
+                <div style="text-align:center; padding:14px 8px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0;">
+                    <div style="font-family:var(--font-mono); font-size:9px; color:#94a3b8; font-weight:700; letter-spacing:1px; margin-bottom:6px;">ACTION</div>
+                    <div style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${avgA>=30?'#16a34a':avgA>=20?'#d97706':'#dc2626'};">${avgA}<span style="font-size:11px; color:#94a3b8;">/40</span></div>
+                </div>
+                <div style="text-align:center; padding:14px 8px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0;">
+                    <div style="font-family:var(--font-mono); font-size:9px; color:#94a3b8; font-weight:700; letter-spacing:1px; margin-bottom:6px;">RESULT</div>
+                    <div style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${avgR>=15?'#16a34a':avgR>=10?'#d97706':'#dc2626'};">${avgR}<span style="font-size:11px; color:#94a3b8;">/20</span></div>
+                </div>
+            </div>
+            ${starAssess.recommendation ? `<div style="padding:14px 18px; border-radius:12px; background:#f5f3ff; border:1px solid #ddd6fe; margin-bottom:16px;">
+                <div style="font-family:var(--font-mono); font-size:9px; color:#7c3aed; font-weight:700; letter-spacing:1px; margin-bottom:6px;">AI STAR ASSESSMENT</div>
+                <div style="font-size:13px; color:#1e293b; line-height:1.6;">${starAssess.recommendation}</div>
+                <div style="display:flex; gap:12px; margin-top:10px; flex-wrap:wrap;">
+                    ${starAssess.strongest_component ? `<span style="font-size:10px; padding:4px 10px; border-radius:8px; background:#dcfce7; color:#16a34a; font-family:var(--font-mono); font-weight:600;">★ Strongest: ${starAssess.strongest_component.toUpperCase()}</span>` : ''}
+                    ${starAssess.weakest_component ? `<span style="font-size:10px; padding:4px 10px; border-radius:8px; background:#fef2f2; color:#dc2626; font-family:var(--font-mono); font-weight:600;">↓ Weakest: ${starAssess.weakest_component.toUpperCase()}</span>` : ''}
+                    ${starAssess.pronoun_pattern ? `<span style="font-size:10px; padding:4px 10px; border-radius:8px; background:#eef2ff; color:#4f46e5; font-family:var(--font-mono); font-weight:600;">Pronoun: ${starAssess.pronoun_pattern}</span>` : ''}
+                    ${starAssess.uses_metrics_in_answers !== undefined ? `<span style="font-size:10px; padding:4px 10px; border-radius:8px; background:${starAssess.uses_metrics_in_answers ? '#dcfce7' : '#fefce8'}; color:${starAssess.uses_metrics_in_answers ? '#16a34a' : '#ca8a04'}; font-family:var(--font-mono); font-weight:600;">Metrics: ${starAssess.uses_metrics_in_answers ? '✓ Uses data' : '✗ No data'}</span>` : ''}
+                </div>
+            </div>` : ''}
+            <div style="font-size:12px; color:#64748b; line-height:1.6;">
+                ${starScores.map((s,i) => {
+                    const qPreview = s.questionContext ? s.questionContext.substring(0, 120) + (s.questionContext.length > 120 ? '…' : '') : '';
+                    const missingComps = (s.missing_components || []).join(', ');
+                    const pronounLabel = s.used_we_vs_i ? ({'we-heavy':'🤝 Team-focused','i-focused':'👤 Individual-focused','balanced':'⚖️ Balanced'}[s.used_we_vs_i] || s.used_we_vs_i) : '';
+                    return `<div style="padding:12px 0; border-bottom:1px solid #e2e8f0;">
+                        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;">
+                            <span style="color:#94a3b8; font-family:var(--font-mono); font-size:10px; font-weight:700;">Answer ${i+1}</span>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                ${pronounLabel ? `<span style="font-size:9px; color:#64748b;">${pronounLabel}</span>` : ''}
+                                ${s.has_metrics ? '<span style="font-size:9px; color:#16a34a;">📊 Has metrics</span>' : ''}
+                                <span style="color:${gc}; font-weight:700; font-size:14px;">${s.star_grade||'?'}</span>
+                                <span style="font-family:var(--font-mono); font-size:10px; color:#94a3b8;">${s.total_score||0}/100</span>
+                            </div>
+                        </div>
+                        ${qPreview ? `<div style="font-size:11px; color:#94a3b8; font-style:italic; margin-bottom:6px; padding:6px 10px; border-radius:8px; background:#f8fafc;">Q: "${qPreview}"</div>` : ''}
+                        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:6px; margin-bottom:4px;">
+                            <div style="font-size:10px; color:#475569;"><span style="color:${s.situation?.present?'#16a34a':'#dc2626'};">${s.situation?.present?'✓':'✗'}</span> S: ${s.situation?.score||0}/20</div>
+                            <div style="font-size:10px; color:#475569;"><span style="color:${s.task?.present?'#16a34a':'#dc2626'};">${s.task?.present?'✓':'✗'}</span> T: ${s.task?.score||0}/20</div>
+                            <div style="font-size:10px; color:#475569;"><span style="color:${s.action?.present?'#16a34a':'#dc2626'};">${s.action?.present?'✓':'✗'}</span> A: ${s.action?.score||0}/40</div>
+                            <div style="font-size:10px; color:#475569;"><span style="color:${s.result?.present?'#16a34a':'#dc2626'};">${s.result?.present?'✓':'✗'}</span> R: ${s.result?.score||0}/20</div>
+                        </div>
+                        ${missingComps ? `<div style="font-size:10px; color:#dc2626; margin-top:2px;">Missing: ${missingComps}</div>` : ''}
+                        ${s.improvement_tip ? `<div style="font-size:11px; color:#7c3aed; margin-top:4px;">💡 ${s.improvement_tip}</div>` : ''}
+                    </div>`;
+                }).join('')}
+            </div>
+        </div>`;
+    }
+
+    main.innerHTML = `<div style="text-align:center; padding:48px 40px; background:white; border-radius:28px; border:1px solid #e2e8f0; box-shadow:0 8px 40px rgba(0,0,0,0.06);">
+        <div style="font-family:var(--font-mono); font-size:10px; color:#2563eb; font-weight:700; letter-spacing:4px; margin-bottom:20px;">FINAL EVALUATION REPORT</div>
+        <div style="width:60px; height:3px; background:linear-gradient(90deg, #2563eb, #7c3aed); margin:0 auto 24px; border-radius:2px;"></div>
+        <div style="font-family:var(--font-display); font-size:96px; font-weight:900; background:linear-gradient(180deg, #0f172a 30%, #2563eb 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; line-height:1;">${avg}<span style="font-size:32px; opacity:0.3; -webkit-text-fill-color:#94a3b8; margin-left:4px;">/100</span></div>
+        <p style="color:#64748b; font-size:18px; margin-top:16px;">${data.verdict || 'Assessment complete'}</p>
+        ${data.adaptive_rating ? `<div style="display:inline-flex; align-items:center; gap:8px; margin:20px auto; padding:8px 20px; border-radius:999px; background:#eef2ff; border:1px solid #c7d2fe; font-family:var(--font-mono); font-size:12px; color:#4f46e5; font-weight:700;"><div style="width:8px; height:8px; border-radius:50%; background:#4f46e5; animation:pulse 2s infinite;"></div>Final ELO: ${data.adaptive_rating} · ${(data.adaptive_tier||'').replace(/_/g,' ').toUpperCase()}</div>` : ''}
         <div style="display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin:48px 0;">
-        ${Object.entries(metrics).map(([key,val]) => { const c = val>80 ? 'var(--green)' : val>60 ? 'var(--accent-light)' : 'var(--amber)'; return `<div style="padding:24px; border-radius:20px; background:var(--bg-card); border:1px solid var(--border-glass);"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;"><span style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:var(--t4); letter-spacing:1.5px; text-transform:uppercase;">${key.replace(/_/g,' ')}</span><span style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${c};">${val}%</span></div><div class="l-bar-bg"><div class="l-bar-fill" style="width:${val}%; background:${c};"></div></div></div>`; }).join('')}
+        ${Object.entries(metrics).map(([key,val]) => { const c = val>80 ? '#16a34a' : val>60 ? '#2563eb' : '#d97706'; return `<div style="padding:24px; border-radius:20px; background:#f8fafc; border:1px solid #e2e8f0;"><div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;"><span style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#94a3b8; letter-spacing:1.5px; text-transform:uppercase;">${key.replace(/_/g,' ')}</span><span style="font-family:var(--font-display); font-size:20px; font-weight:800; color:${c};">${val}%</span></div><div style="height:6px; border-radius:3px; background:#e2e8f0; overflow:hidden;"><div style="height:100%; border-radius:3px; width:${val}%; background:${c}; transition:width 1s ease;"></div></div></div>`; }).join('')}
         </div>
-        ${strengths ? `<div style="padding:32px; border-radius:20px; background:var(--bg-card); border:1px solid var(--border-glass); text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:var(--green); letter-spacing:1.5px; margin-bottom:12px;">STRENGTHS</div><ul style="list-style:none; padding:0;">${strengths}</ul></div>` : ''}
-        ${improvements ? `<div style="padding:32px; border-radius:20px; background:var(--bg-card); border:1px solid var(--border-glass); text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:var(--amber); letter-spacing:1.5px; margin-bottom:12px;">AREAS FOR IMPROVEMENT</div><ul style="list-style:none; padding:0;">${improvements}</ul></div>` : ''}
+        ${starHtml}
+        ${strengths ? `<div style="padding:32px; border-radius:20px; background:white; border:1px solid #dcfce7; text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#16a34a; letter-spacing:1.5px; margin-bottom:12px;">STRENGTHS</div><ul style="list-style:none; padding:0;">${strengths}</ul></div>` : ''}
+        ${improvements ? `<div style="padding:32px; border-radius:20px; background:white; border:1px solid #fde68a; text-align:left; margin-bottom:20px;"><div style="font-family:var(--font-mono); font-size:10px; font-weight:700; color:#d97706; letter-spacing:1.5px; margin-bottom:12px;">AREAS FOR IMPROVEMENT</div><ul style="list-style:none; padding:0;">${improvements}</ul></div>` : ''}
         ${fatalFlaw}
-        ${data.detailed_feedback ? `<div style="padding:40px; border-radius:28px; background:var(--bg-card); border:1px solid var(--border-glass); text-align:left; margin-bottom:48px;"><div style="font-family:var(--font-display); font-size:18px; font-weight:700; color:#fff; margin-bottom:16px;">Executive Summary</div><p style="color:var(--t2); line-height:1.8; font-size:15px;">${data.detailed_feedback}</p></div>` : ''}
+        ${data.detailed_feedback ? `<div style="padding:40px; border-radius:28px; background:#f8fafc; border:1px solid #e2e8f0; text-align:left; margin-bottom:48px;"><div style="font-family:var(--font-display); font-size:18px; font-weight:700; color:#0f172a; margin-bottom:16px;">Executive Summary</div><p style="color:#475569; line-height:1.8; font-size:15px;">${data.detailed_feedback}</p></div>` : ''}
         <div style="display:flex; gap:16px; justify-content:center; flex-wrap:wrap;">
-            <button class="btn-primary" onclick="generatePDFReport()" style="padding:14px 40px; font-weight:700; background:linear-gradient(135deg, #6366f1, #818cf8);">
-                <span class="material-symbols-outlined" style="font-size:18px; vertical-align:middle; margin-right:6px;">picture_as_pdf</span>
+            <button onclick="generatePDFReport()" style="padding:14px 40px; font-weight:700; background:linear-gradient(135deg, #2563eb, #4f46e5); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px;">
+                <span class="material-symbols-outlined" style="font-size:18px;">picture_as_pdf</span>
                 Download PDF Report
             </button>
-            <button class="btn-ghost" onclick="showScreen('selectorScreen')" style="padding:14px 32px;">New Mode</button>
-            <button class="btn-ghost" onclick="window.location.reload()" style="padding:14px 32px;">Fresh Start</button>
+            <button onclick="shareResults()" style="padding:14px 32px; font-weight:700; background:linear-gradient(135deg, #16a34a, #059669); color:white; border:none; border-radius:14px; cursor:pointer; font-size:14px; display:inline-flex; align-items:center; gap:8px;">
+                <span class="material-symbols-outlined" style="font-size:18px;">share</span>
+                Share Results
+            </button>
+            <button onclick="showScreen('selectorScreen')" style="padding:14px 32px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px;">New Mode</button>
+            <button onclick="window.location.reload()" style="padding:14px 32px; background:#f1f5f9; color:#334155; border:1px solid #e2e8f0; border-radius:14px; font-weight:600; cursor:pointer; font-size:14px;">Fresh Start</button>
         </div>
     </div>`;
 }
@@ -1853,6 +2128,171 @@ function generatePDFReport() {
         }
 
         // ═════════════════════════════════════════════
+        // STAR BEHAVIORAL ANALYSIS
+        // ═════════════════════════════════════════════
+        const pdfStarScores = data.starScores || [];
+        if (pdfStarScores.length > 0) {
+            sectionHeader('STAR BEHAVIORAL ANALYSIS', [167, 139, 250]);
+
+            const avgTotal = Math.round(pdfStarScores.reduce((s, x) => s + (x.total_score || 0), 0) / pdfStarScores.length);
+            const grades = pdfStarScores.map(x => x.star_grade || '?');
+            const dominantGrade = grades.sort((a,b) => grades.filter(v => v===a).length - grades.filter(v => v===b).length).pop() || '?';
+
+            // Summary box
+            checkPageBreak(20);
+            doc.setFillColor(252, 250, 255);
+            doc.roundedRect(margin, y, contentW, 16, 3, 3, 'F');
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(16);
+            doc.setTextColor(167, 139, 250);
+            doc.text(dominantGrade, margin + 8, y + 12);
+            doc.setFontSize(10);
+            doc.setTextColor(80, 80, 80);
+            doc.text(`Average STAR Score: ${avgTotal}/100 across ${pdfStarScores.length} behavioral answer(s)`, margin + 22, y + 10);
+            y += 22;
+
+            // AI STAR Assessment recommendation box
+            const pdfStarAssess = data.star_assessment || {};
+            if (pdfStarAssess.recommendation) {
+                checkPageBreak(28);
+                doc.setFillColor(248, 245, 255);
+                const recLines = doc.splitTextToSize(pdfStarAssess.recommendation, contentW - 16);
+                const recH = Math.max(18, recLines.length * 4 + 14);
+                doc.roundedRect(margin, y, contentW, recH, 3, 3, 'F');
+                doc.setDrawColor(167, 139, 250);
+                doc.setLineWidth(0.3);
+                doc.roundedRect(margin, y, contentW, recH, 3, 3, 'S');
+                doc.setFont('helvetica', 'bold');
+                doc.setFontSize(7);
+                doc.setTextColor(167, 139, 250);
+                doc.text('AI STAR ASSESSMENT', margin + 5, y + 5);
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(8);
+                doc.setTextColor(60, 60, 60);
+                recLines.forEach((line, li) => {
+                    doc.text(line, margin + 5, y + 10 + li * 4);
+                });
+                // Tags row
+                let tagX = margin + 5;
+                const tagY = y + 10 + recLines.length * 4 + 2;
+                if (tagY < y + recH - 2) {
+                    doc.setFontSize(6);
+                    if (pdfStarAssess.strongest_component) {
+                        doc.setTextColor(34, 197, 94);
+                        doc.text(`Strongest: ${pdfStarAssess.strongest_component.toUpperCase()}`, tagX, tagY);
+                        tagX += 38;
+                    }
+                    if (pdfStarAssess.weakest_component) {
+                        doc.setTextColor(239, 68, 68);
+                        doc.text(`Weakest: ${pdfStarAssess.weakest_component.toUpperCase()}`, tagX, tagY);
+                        tagX += 35;
+                    }
+                    if (pdfStarAssess.pronoun_pattern) {
+                        doc.setTextColor(99, 102, 241);
+                        doc.text(`Pronoun: ${pdfStarAssess.pronoun_pattern}`, tagX, tagY);
+                        tagX += 35;
+                    }
+                    if (pdfStarAssess.uses_metrics_in_answers !== undefined) {
+                        doc.setTextColor(pdfStarAssess.uses_metrics_in_answers ? 34 : 251, pdfStarAssess.uses_metrics_in_answers ? 197 : 191, pdfStarAssess.uses_metrics_in_answers ? 94 : 36);
+                        doc.text(`Metrics: ${pdfStarAssess.uses_metrics_in_answers ? 'Yes' : 'No'}`, tagX, tagY);
+                    }
+                }
+                y += recH + 4;
+            }
+
+            // STAR scores table
+            const starRows = pdfStarScores.map((s, i) => [
+                `Answer ${i + 1}`,
+                `${s.situation?.score || 0}/20 ${s.situation?.present ? '✓' : '✗'}`,
+                `${s.task?.score || 0}/20 ${s.task?.present ? '✓' : '✗'}`,
+                `${s.action?.score || 0}/40 ${s.action?.present ? '✓' : '✗'}`,
+                `${s.result?.score || 0}/20 ${s.result?.present ? '✓' : '✗'}`,
+                s.star_grade || '?',
+                `${s.total_score || 0}/100`
+            ]);
+
+            doc.autoTable({
+                startY: y,
+                head: [['ANSWER', 'SITUATION', 'TASK', 'ACTION', 'RESULT', 'GRADE', 'TOTAL']],
+                body: starRows,
+                margin: { left: margin, right: margin },
+                styles: { font: 'helvetica', fontSize: 8, cellPadding: 3 },
+                headStyles: { fillColor: [167, 139, 250], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 7 },
+                alternateRowStyles: { fillColor: [252, 250, 255] },
+                columnStyles: {
+                    0: { fontStyle: 'bold', cellWidth: 25 },
+                    5: { halign: 'center', fontStyle: 'bold' },
+                    6: { halign: 'center' }
+                },
+                didDrawPage: () => { addWatermark(); }
+            });
+            y = doc.lastAutoTable.finalY + 4;
+
+            // Per-answer detailed breakdown with question context & component feedback
+            pdfStarScores.forEach((s, i) => {
+                checkPageBreak(30);
+                // Question context
+                if (s.questionContext) {
+                    doc.setFont('helvetica', 'bold');
+                    doc.setFontSize(7);
+                    doc.setTextColor(99, 102, 241);
+                    doc.text(`Answer ${i + 1} — Question:`, margin + 3, y);
+                    y += 3.5;
+                    doc.setFont('helvetica', 'italic');
+                    doc.setFontSize(7);
+                    doc.setTextColor(100, 100, 100);
+                    const qLines = doc.splitTextToSize(`"${s.questionContext.substring(0, 200)}"`, contentW - 8);
+                    qLines.slice(0, 2).forEach(line => {
+                        doc.text(line, margin + 3, y);
+                        y += 3;
+                    });
+                    y += 1;
+                }
+                // Component feedback
+                doc.setFont('helvetica', 'normal');
+                doc.setFontSize(7);
+                const components = [
+                    { label: 'S', data: s.situation, max: 20 },
+                    { label: 'T', data: s.task, max: 20 },
+                    { label: 'A', data: s.action, max: 40 },
+                    { label: 'R', data: s.result, max: 20 }
+                ];
+                components.forEach(comp => {
+                    if (comp.data?.feedback) {
+                        checkPageBreak(5);
+                        const present = comp.data.present;
+                        doc.setTextColor(present ? 34 : 239, present ? 197 : 68, present ? 94 : 68);
+                        doc.text(`${present ? '✓' : '✗'} ${comp.label}: ${comp.data.score || 0}/${comp.max}`, margin + 5, y);
+                        doc.setTextColor(80, 80, 80);
+                        doc.text(` — ${comp.data.feedback}`, margin + 25, y);
+                        y += 3.5;
+                    }
+                });
+                // Metadata tags
+                const tags = [];
+                if (s.used_we_vs_i) tags.push(`Pronoun: ${s.used_we_vs_i}`);
+                if (s.has_metrics) tags.push('Has quantitative metrics');
+                if (s.missing_components?.length > 0) tags.push(`Missing: ${s.missing_components.join(', ')}`);
+                if (tags.length > 0) {
+                    doc.setFontSize(6);
+                    doc.setTextColor(130, 100, 160);
+                    doc.text(tags.join(' · '), margin + 5, y);
+                    y += 3;
+                }
+                // Improvement tip
+                if (s.improvement_tip) {
+                    doc.setFont('helvetica', 'italic');
+                    doc.setFontSize(7);
+                    doc.setTextColor(130, 100, 160);
+                    doc.text(`Tip: ${s.improvement_tip}`, margin + 5, y);
+                    y += 3.5;
+                }
+                y += 2;
+            });
+            y += 4;
+        }
+
+        // ═════════════════════════════════════════════
         // STRENGTHS & WEAKNESSES
         // ═════════════════════════════════════════════
         if (data.strengths?.length > 0 || data.improvements?.length > 0) {
@@ -2098,7 +2538,14 @@ async function speakText(text, company, round) {
         source.start(audioCtx.currentTime);
         currentSource = source; isTalking = true;
         source.onended = () => { currentSource = null; isTalking = false; };
-    } catch(err) { console.error('speakText error:', err); fallbackSpeak(cleaned); }
+    } catch(err) {
+        console.error('speakText error:', err);
+        if (!window._voiceErrorShown) {
+            window._voiceErrorShown = true;
+            showToast('🔊 Neural voice unavailable — using browser voice instead. Interview continues normally.', 'warn', 6000);
+        }
+        fallbackSpeak(cleaned);
+    }
 }
 
 // ── PRONUNCIATION MAP FOR FALLBACK TTS ──
@@ -2247,22 +2694,36 @@ function startFaceAnalysis(video) {
 function attachProctoringListeners() {
     if (tabSwitchListenerAttached) return; // Prevent duplicate listeners
     tabSwitchListenerAttached = true;
+    // Set grace period — ignore early blurs (page load, fullscreen transitions, etc.)
+    proctoringGraceUntil = Date.now() + PROCTORING_GRACE_MS;
 
     window.addEventListener('blur', () => {
         if (!interviewActive) return;
+        // Grace period: ignore blurs right after interview starts
+        if (Date.now() < proctoringGraceUntil) {
+            addLog('[SECURITY] Focus change during grace period — ignored', 'info');
+            return;
+        }
+        // Cooldown: ignore rapid successive blur events (OS-level focus changes, notifications, etc.)
+        const now = Date.now();
+        if (now - lastBlurTime < PROCTORING_COOLDOWN_MS) {
+            addLog('[SECURITY] Rapid focus change — cooldown active, not counted', 'info');
+            return;
+        }
+        lastBlurTime = now;
         tabSwitchCount++;
         addLog(`[SECURITY] Tab switch detected! (${tabSwitchCount}/${PROCTORING_MAX_WARNINGS + 1})`, 'warn');
 
         if (tabSwitchCount <= PROCTORING_MAX_WARNINGS) {
             const remaining = PROCTORING_MAX_WARNINGS + 1 - tabSwitchCount;
-            const severity = tabSwitchCount === 1 ? 'warn' : 'error';
+            const severity = tabSwitchCount <= 2 ? 'warn' : 'error';
             showToast(
                 `⚠️ Warning ${tabSwitchCount}/${PROCTORING_MAX_WARNINGS}: Tab switch detected! ${remaining} warning(s) before interview ends.`,
                 severity, 7000
             );
             showProctoringWarningBanner(`TAB SWITCH DETECTED — Warning ${tabSwitchCount}/${PROCTORING_MAX_WARNINGS}`);
         } else {
-            // 3rd strike — auto-terminate
+            // 4th strike — auto-terminate
             terminateForViolation('Tab switching detected more than ' + PROCTORING_MAX_WARNINGS + ' times. Interview terminated for proctoring violation.');
         }
     });
@@ -2399,24 +2860,68 @@ function initDragDrop() {
 // INIT
 // ══════════════════════════════════════════════════════════════
 document.addEventListener('DOMContentLoaded', () => {
-    showScreen('uploadScreen');
+    // ── RELOAD PROTECTION ──
+    // Block page reload/close during active interview
+    window.addEventListener('beforeunload', (e) => {
+        if (!interviewActive) return;
+        // Increment reload warning count
+        let warns = parseInt(sessionStorage.getItem('placera_reload_warns') || '0') + 1;
+        sessionStorage.setItem('placera_reload_warns', warns);
+        // Native browser "are you sure?" dialog
+        e.preventDefault();
+        e.returnValue = `⚠️ Warning ${warns}/3: Reloading during the interview is flagged as misconduct.`;
+        return e.returnValue;
+    });
+
+    // ── SESSION RESTORE ON RELOAD ──
+    const saved = (() => { try { return JSON.parse(sessionStorage.getItem('placera_active_session') || 'null'); } catch(e) { return null; } })();
+    const reloadWarns = parseInt(sessionStorage.getItem('placera_reload_warns') || '0');
+
+    if (saved && saved.sessionId && saved.interviewActive) {
+        // Interview was in progress — check warning count
+        if (reloadWarns >= 3) {
+            // 4th reload = terminate
+            sessionStorage.removeItem('placera_active_session');
+            sessionStorage.removeItem('placera_reload_warns');
+            showScreen('uploadScreen');
+            setTimeout(() => showToast('❌ Interview terminated: Too many page reloads (proctoring violation)', 'error', 8000), 500);
+        } else {
+            // Restore session
+            sessionId = saved.sessionId;
+            currentMode = saved.currentMode || 'tech-only';
+            currentRound = saved.currentRound || 1;
+            maxQuestions = saved.maxQuestions || 12;
+            showScreen('interviewScreen');
+            // Show warning overlay
+            setTimeout(() => {
+                showToast(`⚠️ Reload Warning ${reloadWarns}/3 — Interview restored. Next reload will count against you.`, 'warn', 6000);
+                setQText(saved.lastQuestion || 'Resuming your interview...');
+                interviewActive = true;
+                startTimer();
+                updateDots(saved.questionCount || 1, maxQuestions);
+                if (saved.adaptiveRating) updateEloDisplay(saved.adaptiveRating, saved.adaptiveTier);
+            }, 600);
+        }
+    } else {
+        // Fresh start — clear any stale warnings
+        sessionStorage.removeItem('placera_reload_warns');
+        showScreen('uploadScreen');
+    }
+
     initializeNeuralRipple();
     initDragDrop();
     if (window.speechSynthesis) window.speechSynthesis.getVoices();
-    // Keyboard shortcuts — enhanced for DSA modal
+    setTimeout(() => initEditor(), 1500);
     document.addEventListener('keydown', (e) => {
-        // ESC: close DSA modal first, then editor
         if (e.key === 'Escape') {
             if (dsaModalOpen) { closeDSAModal(); return; }
             if (editorOpen) toggleEditor(false);
         }
         if (e.ctrlKey && e.key === 'Enter' && editorOpen) submitCode();
         if (e.ctrlKey && e.key === 'r' && editorOpen) { e.preventDefault(); runInTerminal(); }
-        // Ctrl+Q: toggle pinned question
         if (e.ctrlKey && e.key === 'q' && currentDSAQuestion) { e.preventDefault(); togglePinnedQuestion(); }
     });
 
-    // DSA Modal: click overlay to close
     const dsaOverlay = document.getElementById('dsaModal');
     if (dsaOverlay) {
         dsaOverlay.addEventListener('click', (e) => {
@@ -2424,3 +2929,36 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 });
+
+
+// ══════════════════════════════════════════════════════════════
+// SHARE RESULTS — Web Share API with clipboard fallback
+// ══════════════════════════════════════════════════════════════
+function shareResults() {
+    const data = window._lastScorecard;
+    if (!data) { showToast('No results to share yet', 'warn'); return; }
+
+    const score = data.overall || 0;
+    const verdict = data.verdict || 'Completed';
+    const tier = data.adaptive_tier || 'mid_level';
+    const shareText = `🎯 I just completed an AI mock interview on Placera!\n\n` +
+        `📊 Score: ${score}/100 · Verdict: ${verdict}\n` +
+        `🏆 Difficulty Tier: ${tier.replace(/_/g, ' ').toUpperCase()}\n` +
+        `⚡ ELO Rating: ${data.adaptive_rating || 50}/100\n\n` +
+        `Practice your interviews with AI → placera.app`;
+
+    if (navigator.share) {
+        navigator.share({
+            title: 'My Placera Interview Results',
+            text: shareText,
+        }).catch(() => {});
+    } else {
+        // Fallback: copy to clipboard
+        navigator.clipboard.writeText(shareText).then(() => {
+            showToast('📋 Results copied to clipboard! Share it anywhere.', 'good', 5000);
+        }).catch(() => {
+            // Final fallback: prompt with text
+            prompt('Copy your results:', shareText);
+        });
+    }
+}

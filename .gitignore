@@ -31,3 +31,10 @@ coverage/
 
 # Build
 dist/
+
+# Temp fix scripts
+fix_*.py
+minimal.js
+ui_1.html
+test_resume.txt
+scratch/

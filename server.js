@@ -9,7 +9,9 @@ const express = require('express');
 const axios = require('axios');
 const multer = require('multer');
 const pdfParse = require('pdf-parse');
+const mammoth = require('mammoth');
 const Groq = require('groq-sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const helmet = require('helmet');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
@@ -24,6 +26,12 @@ const {
   markQuestionUsed,
   usedQuestions
 } = require('./prompts/unified');
+
+// ── HELPERS ──
+function sanitize(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/<[^>]*>?/gm, '').trim();
+}
 
 // ── ENV VALIDATION (warn, don't crash) ──
 if (!process.env.ELEVENLABS_VOICE_ID) {
@@ -114,6 +122,70 @@ async function groqChat(params, retries = 0) {
     }
     throw err;
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+// GEMINI INTEGRATION
+// ══════════════════════════════════════════════════════════════
+async function geminiChat(params) {
+  try {
+    if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY missing");
+    
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    // Use gemini-1.5-flash for speed/cost, or pro for reasoning
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const systemMsg = params.messages.find(m => m.role === 'system')?.content;
+    let history = params.messages
+      .filter(m => m.role !== 'system')
+      .slice(0, -1)
+      .map(m => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }]
+      }));
+    
+    // Gemini requires first message to be 'user'
+    if (history.length > 0 && history[0].role === 'model') {
+      history.unshift({ role: 'user', parts: [{ text: "Hello, I'm ready for the interview." }] });
+    }
+    
+    const lastMsg = params.messages.filter(m => m.role !== 'system').pop()?.content || "";
+
+    const chat = model.startChat({
+      history,
+      systemInstruction: systemMsg,
+      generationConfig: {
+        maxOutputTokens: params.max_tokens || 1000,
+        temperature: params.temperature || 0.7,
+      }
+    });
+
+    const result = await chat.sendMessage(lastMsg);
+    const response = await result.response;
+    return {
+      choices: [{ message: { content: response.text() } }]
+    };
+  } catch (err) {
+    console.error("Gemini Error:", err.message);
+    throw err;
+  }
+}
+
+// ── UNIFIED AI CHAT — Prioritizes Gemini, falls back to Groq ──
+async function aiChat(params) {
+  if (process.env.GEMINI_API_KEY && !process.env.GEMINI_API_KEY.startsWith('#')) {
+    try {
+      return await geminiChat(params);
+    } catch (err) {
+      console.warn("Gemini failed, falling back to Groq...");
+    }
+  }
+  
+  // Map Gemini-style temperature/params to Groq if needed
+  const groqParams = { ...params };
+  if (!groqParams.model) groqParams.model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  
+  return await groqChat(groqParams);
 }
 
 app.use(express.json({ limit: '1mb' }));
@@ -301,7 +373,7 @@ async function checkContradictions(session, currentAnswer) {
   if (!mem || mem.candidateClaims.length < 2) return null;
   const pastClaims = mem.candidateClaims.map(c => `[${c.type}] ${c.text}`).join('\n');
   try {
-    const result = await groqChat({
+    const result = await aiChat({
       model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
       max_tokens: 100,
       messages: [{ role: 'user', content: `Check if this answer contradicts past claims.\n\nPAST CLAIMS:\n${pastClaims}\n\nNEW ANSWER: "${currentAnswer}"\n\nReturn ONLY JSON: {"has_contradiction": true/false, "detail": "brief description or null"}` }]
@@ -364,9 +436,29 @@ app.post('/api/upload-resume', uploadLimiter, upload.single('resume'), async (re
       return res.status(400).json({ error: 'Invalid file type. Please upload a PDF, DOC, DOCX, or TXT resume.' });
     }
 
-    let resumeText = req.file.mimetype === 'application/pdf'
-      ? (await pdfParse(req.file.buffer)).text
-      : req.file.buffer.toString('utf-8');
+    let resumeText = '';
+    const isDocx = req.file.mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || req.file.originalname.match(/\.docx$/i);
+    const isDoc = req.file.mimetype === 'application/msword' || req.file.originalname.match(/\.doc$/i);
+
+    if (req.file.mimetype === 'application/pdf' || req.file.originalname.match(/\.pdf$/i)) {
+      resumeText = (await pdfParse(req.file.buffer)).text;
+    } else if (isDocx || isDoc) {
+      // mammoth handles both .docx and some .doc files
+      try {
+        const result = await mammoth.extractRawText({ buffer: req.file.buffer });
+        resumeText = result.value;
+        if (!resumeText || resumeText.trim().length < 50) throw new Error('empty');
+      } catch (e) {
+        // For old .doc files mammoth can't parse, try raw text
+        resumeText = req.file.buffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+        if (resumeText.trim().length < 100) {
+          return res.status(400).json({ error: 'Could not read this Word file. Please save it as .docx or .pdf and re-upload.' });
+        }
+      }
+    } else {
+      resumeText = req.file.buffer.toString('utf-8');
+    }
+
 
     // ── STEP 2: Minimum content check ──
     const cleanText = resumeText.replace(/\s+/g, ' ').trim();
@@ -420,7 +512,7 @@ app.post('/api/upload-resume', uploadLimiter, upload.single('resume'), async (re
     // ── STEP 4: AI-powered resume verification (for ambiguous cases) ──
     if (resumeScore < 3 || nonResumeScore >= 2) {
       try {
-        const verifyResult = await groqChat({
+        const verifyResult = await aiChat({
           model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', max_tokens: 100,
           messages: [{ role: 'user', content: `Classify this document. Is it a RESUME/CV or something else (research paper, essay, article, letter, invoice, random text)?
 
@@ -458,7 +550,7 @@ Return ONLY valid JSON:
     console.log(`[RESUME ACCEPTED] resumeScore=${resumeScore}, nonResumeScore=${nonResumeScore}, length=${cleanText.length}`);
 
     // ── STEP 5: Extract resume data ──
-    const extraction = await groqChat({
+    const extraction = await aiChat({
       model: 'llama-3.3-70b-versatile', max_tokens: 800,
       messages: [{ role: 'user', content: `Extract from this resume. Return ONLY valid JSON, no extra text:\n${resumeText.substring(0, 4000)}\n\nReturn exactly:\n{"name":"","degree":"","college":"","skills":[],"primary_language":"Python","domain":"General","projects":[{"name":"","description":"","tech":[],"highlights":""}],"internships":[{"company":"","role":"","description":""}],"achievements":[]}` }]
     });
@@ -548,7 +640,7 @@ Achievements: ${(rd.achievements || []).join(', ') || 'None'}`;
       ? `Greet the candidate warmly and ask them to introduce themselves. One sentence max. Be natural.`
       : `You just joined a video call with the candidate. Start naturally — "Hey, good to finally connect!" — then ask them to introduce themselves. One sentence max.`;
 
-    const response = await groqChat({
+    const response = await aiChat({
       model: 'llama-3.3-70b-versatile', max_tokens: 250,
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: openingMsg }]
     });
@@ -593,7 +685,7 @@ async function evaluateAnswerQuality(answer, lastQuestion, session) {
   if (!answer || answer.length < 3) return { quality: 'unclear', needs_clarification: true };
 
   try {
-    const result = await groqChat({
+    const result = await aiChat({
       model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
       max_tokens: 150,
       messages: [{ role: 'user', content: `Classify intent of this interview response: "${answer}"\n\nIntents: "clear", "vague", "unclear", "meta_feedback", "off_topic"\n\nReturn ONLY JSON: {"quality":"clear"|"vague"|"unclear"|"meta_feedback"|"off_topic","is_meta":true|false,"needs_clarification":true|false,"clarification_prompt":"Redirect or probe"}` }]
@@ -696,7 +788,7 @@ app.post('/api/answer', async (req, res) => {
   if (session.questionCount >= maxQ) {
     const closeMsg = 'Close the interview. Thank them, give brief honest feedback, tell them results in 2-3 days. 2-3 sentences.';
     try {
-      const r = await groqChat({ model: 'llama-3.3-70b-versatile', max_tokens: 150, messages: [...session.history, { role: 'user', content: closeMsg }] });
+      const r = await aiChat({ model: 'llama-3.3-70b-versatile', max_tokens: 150, messages: [...session.history, { role: 'user', content: closeMsg }] });
       return res.json({
         question: r.choices[0].message.content.replace(/\[FACT_ERROR:[^\]]*\]/g, '').trim(),
         end: true, round: session.round, factErrors: session.factErrors,
@@ -719,7 +811,7 @@ app.post('/api/answer', async (req, res) => {
       if (memoryCtx) activeMessages.push({ role: 'system', content: memoryCtx });
     }
 
-    const response = await groqChat({ model: 'llama-3.3-70b-versatile', max_tokens: 300, messages: activeMessages });
+    const response = await aiChat({ model: 'llama-3.3-70b-versatile', max_tokens: 300, messages: activeMessages });
     let rawResponse = response.choices[0].message.content;
 
     // Extract fact errors
@@ -803,7 +895,7 @@ app.post('/api/live-score', async (req, res) => {
     : `Score this technical interview answer STRICTLY. High scores (80+) ONLY for perfect answers.\n\nAnswer: "${answer}"\nType: ${questionType || 'technical'}\n\nReturn ONLY JSON:\n{"technical_depth":0-100,"problem_solving":0-100,"communication":0-100,"confidence":0-100,"factual_accuracy":0-100,"overall":0-100,"coach_tip":"One SHORT tip (max 12 words)"}`;
 
   try {
-    const result = await groqChat({ model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', max_tokens: 150, messages: [{ role: 'user', content: prompt }] });
+    const result = await aiChat({ model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', max_tokens: 150, messages: [{ role: 'user', content: prompt }] });
     const raw = result.choices[0].message.content.trim();
     const scores = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
 
@@ -829,12 +921,15 @@ app.post('/api/star-analyze', async (req, res) => {
   touchSession(session);
 
   try {
-    const result = await groqChat({
+    const result = await aiChat({
       model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', max_tokens: 300,
       messages: [{ role: 'user', content: `Analyze this behavioral interview answer using STAR framework:\n\nQUESTION: "${questionContext}"\nANSWER: "${answer}"\n\nReturn ONLY JSON:\n{"situation":{"score":0-20,"present":true/false,"feedback":"one sentence"},"task":{"score":0-20,"present":true/false,"feedback":"one sentence"},"action":{"score":0-40,"present":true/false,"feedback":"one sentence"},"result":{"score":0-20,"present":true/false,"feedback":"one sentence"},"total_score":0-100,"star_grade":"A/B/C/D/F","missing_components":["list"],"improvement_tip":"One tip (max 15 words)","used_we_vs_i":"we-heavy"|"i-focused"|"balanced","has_metrics":true/false}` }]
     });
     const raw = result.choices[0].message.content.trim();
     const starData = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || raw);
+    // Store question context with STAR data for rich report generation
+    starData.questionContext = (questionContext || '').substring(0, 300);
+    starData.answerPreview = (answer || '').substring(0, 300);
     if (!session.starScores) session.starScores = [];
     session.starScores.push(starData);
     res.json(starData);
@@ -880,7 +975,7 @@ Evaluate the code and return ONLY valid JSON (no markdown, no explanation):
 }`;
 
   try {
-    const result = await groqChat({
+    const result = await aiChat({
       model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }]
@@ -909,12 +1004,34 @@ app.post('/api/scorecard', async (req, res) => {
     ? `\nADAPTIVE PERFORMANCE: Final Rating ${Math.round(session.adaptiveEngine.rating)}/100 | Peak: ${Math.round(session.adaptiveEngine.peakRating)}/100 | Tier: ${session.adaptiveEngine.getTier()}`
     : '';
 
-  const metricsKeys = '"technical_depth":0,"problem_solving":0,"communication":0,"confidence":0,"behavioral":0,"system_design":0';
+  // STAR analysis summary for scorecard
+  const starScores = session.starScores || [];
+  let starSummary = '';
+  if (starScores.length > 0) {
+    const avgTotal = Math.round(starScores.reduce((s, x) => s + (x.total_score || 0), 0) / starScores.length);
+    const grades = starScores.map(x => x.star_grade || '?').join(', ');
+    starSummary = `\nSTAR BEHAVIORAL ANALYSIS (${starScores.length} answers): Average Score: ${avgTotal}/100 | Grades: ${grades}`;
+    starScores.forEach((s, i) => {
+      starSummary += `\n  Answer ${i+1}: S=${s.situation?.score||0}/20 T=${s.task?.score||0}/20 A=${s.action?.score||0}/40 R=${s.result?.score||0}/20 Grade=${s.star_grade||'?'}`;
+      if (s.used_we_vs_i) starSummary += ` | Pronoun: ${s.used_we_vs_i}`;
+      if (s.has_metrics !== undefined) starSummary += ` | HasMetrics: ${s.has_metrics}`;
+      if (s.missing_components?.length > 0) starSummary += ` | Missing: ${s.missing_components.join(',')}`;
+    });
+  }
+
+  const isHR = session.mode === 'hr-only' || session.round === 2;
+  const metricsKeys = isHR
+    ? '"communication":0,"behavioral":0,"leadership":0,"cultural_fit":0,"star_method":0,"confidence":0'
+    : '"technical_depth":0,"problem_solving":0,"communication":0,"confidence":0,"behavioral":0,"system_design":0';
+  const starAssessmentField = starScores.length > 0
+    ? ',"star_assessment":{"overall_grade":"A/B/C/D/F","avg_score":0,"strongest_component":"situation/task/action/result","weakest_component":"situation/task/action/result","recommendation":"1-2 sentence STAR-specific hiring recommendation","pronoun_pattern":"we-heavy/i-focused/balanced","uses_metrics_in_answers":true/false}'
+    : '';
   const strictRule = '\nCRITICAL GRADING RULE: If the candidate provided very short, vague, or no substantive answers (effectively remaining silent), the overall score MUST be extremely low (0-20), the verdict MUST be "No hire", and all metrics must be heavily penalized. Do not invent positive attributes if the candidate did not speak substantially. Be brutal but honest.';
-  const prompt = `Based on this interview, generate an honest, detailed scorecard.${factSummary}${adaptiveInfo}${strictRule}\n\nReturn ONLY valid JSON:\n{"overall":0,"metrics":{${metricsKeys}},"strengths":["specific strength","another"],"improvements":["specific improvement","another"],"fatal_flaw":"critical issue or null","factual_errors":${JSON.stringify(session.factErrors)},"verdict":"Strong hire or Hire or Maybe or No hire","offer_likelihood":0,"next_step":"next step","detailed_feedback":"2-3 sentence honest assessment","adaptive_rating":${Math.round(session.adaptiveEngine?.rating || 50)},"adaptive_tier":"${session.adaptiveEngine?.getTier() || 'mid_level'}"}`;
+  const starWeightRule = starScores.length > 0 ? `\nSTAR WEIGHT RULE: The STAR behavioral analysis carries significant weight in the final verdict. A candidate with poor STAR scores (avg < 50) should have "behavioral" and "star_method" metrics heavily penalized. The "star_assessment" must honestly reflect their ability to structure behavioral answers. The star_method metric should reflect how well the candidate used the STAR method across all answers.` : '';
+  const prompt = `Based on this interview, generate an honest, detailed scorecard.${factSummary}${adaptiveInfo}${starSummary}${strictRule}${starWeightRule}\n\nReturn ONLY valid JSON:\n{"overall":0,"metrics":{${metricsKeys}},"strengths":["specific strength","another"],"improvements":["specific improvement","another"],"fatal_flaw":"critical issue or null","factual_errors":${JSON.stringify(session.factErrors)},"verdict":"Strong hire or Hire or Maybe or No hire","offer_likelihood":0,"next_step":"next step","detailed_feedback":"2-3 sentence honest assessment","adaptive_rating":${Math.round(session.adaptiveEngine?.rating || 50)},"adaptive_tier":"${session.adaptiveEngine?.getTier() || 'mid_level'}"${starAssessmentField}}`;
 
   try {
-    const response = await groqChat({
+    const response = await aiChat({
       model: 'llama-3.3-70b-versatile', max_tokens: 800,
       messages: [...session.history.slice(1), { role: 'user', content: prompt }]
     });
@@ -968,7 +1085,8 @@ app.post('/api/scorecard', async (req, res) => {
       candidate,
       interviewMeta,
       factual_errors: session.factErrors,
-      runningScores: session.runningScores || {}
+      runningScores: session.runningScores || {},
+      starScores: session.starScores || []
     });
   } catch {
     res.status(500).json({ error: 'Could not generate scorecard' });
