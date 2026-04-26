@@ -367,7 +367,7 @@ async function transcribeAndSend() {
     try {
         const audioType = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'audio/webm';
         const audioBlob = new Blob(audioChunks, { type: audioType });
-        if (audioBlob.size < 1000) {
+        if (audioBlob.size < 100) {
             resetAnswerBtn();
             addLog('Too short — speak more clearly', 'warn');
             showToast('🎙️ You are not audible. Please speak louder and try again.', 'warn', 5000);
