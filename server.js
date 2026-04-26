@@ -702,11 +702,16 @@ Achievements: ${(rd.achievements || []).join(', ') || 'None'}`;
 
 // ── ANSWER QUALITY EVALUATION ──
 async function evaluateAnswerQuality(answer, lastQuestion, session) {
-  const metaRegex = /pardon|repeat|say again|not audible|can't hear|cannot hear|voice is breaking|breaking up|speak louder|hear you|not clear|quiet|louder|again please|didn't catch|sorry what/i;
+  const metaRegex = /pardon|repeat|say again|not audible|can't hear|cannot hear|voice is breaking|breaking up|speak louder|hear you|not clear|quiet|louder|again please|didn't catch|sorry what|am i audible|can you hear me|is my voice|is my mic|mic working|audio working/i;
+  const audibilityCheckRegex = /am i audible|can you hear me|is my voice|is my mic|are you able to hear|hello.*can.*hear/i;
   const banterRegex = /how are you|how is it going|nice weather|nice office|you look good|good morning|hello|hi there/i;
 
+  if (audibilityCheckRegex.test(answer.trim())) {
+    // Candidate asking if they're audible — confirm and continue
+    return { quality: 'audibility_check', is_meta: true, is_audibility: true, needs_clarification: false };
+  }
   if (metaRegex.test(answer.trim())) {
-    return { quality: 'meta_feedback', is_meta: true, needs_clarification: false };
+    return { quality: 'meta_feedback', is_meta: true, is_audibility: false, needs_clarification: false };
   }
   if (banterRegex.test(answer.trim()) && answer.length < 30) {
     return { quality: 'off_topic', is_meta: false, needs_clarification: true, clarification_prompt: "Let's stick to the interview. " + lastQuestion };
@@ -795,9 +800,13 @@ app.post('/api/answer', async (req, res) => {
   }
 
   // Meta-feedback handling
-  if (qualityCheck.is_meta) {
+  if (qualityCheck.is_audibility) {
+    // Candidate asking "am I audible?" — confirm naturally and repeat the question
     const lastQ = session.history.filter(h => h.role === 'assistant').slice(-1)[0]?.content || '';
-    session.history.push({ role: 'system', content: `CRITICAL: Candidate reporting technical issue. Apologize and repeat: "${lastQ}"` });
+    session.history.push({ role: 'system', content: `The candidate just asked if they are audible. Respond BRIEFLY and naturally: "Yes, I can hear you perfectly fine! Let's continue." Then repeat your last question: "${lastQ.substring(0, 200)}" — Do NOT go into troubleshooting mode. Stay in interviewer character.` });
+  } else if (qualityCheck.is_meta) {
+    const lastQ = session.history.filter(h => h.role === 'assistant').slice(-1)[0]?.content || '';
+    session.history.push({ role: 'system', content: `Candidate reporting a technical audio issue. Briefly acknowledge: "Sorry about that, let me repeat." Then repeat: "${lastQ.substring(0, 200)}"` });
   } else if (qualityCheck.needs_clarification) {
     session.history.push({ role: 'system', content: `Respond to vague answer: "${qualityCheck.clarification_prompt || 'Can you elaborate?'}" Don't move to next question yet.` });
   }
@@ -831,10 +840,13 @@ app.post('/api/answer', async (req, res) => {
 
   try {
     let activeMessages = [...session.history];
-    if (qualityCheck.is_meta) {
+    if (qualityCheck.is_audibility) {
+      // For audibility checks, keep interviewer persona — don't switch to troubleshooter
+      // The system message already handles it
+    } else if (qualityCheck.is_meta) {
       const lastQ = session.history.filter(h => h.role === 'assistant').slice(-1)[0]?.content || '';
       const troubleshootName = session.interviewerName || 'David';
-      activeMessages[0] = { role: 'system', content: `You are ${troubleshootName}, troubleshooting call quality. Apologize and repeat: "${lastQ}". DO NOT ask new questions.` };
+      activeMessages[0] = { role: 'system', content: `You are ${troubleshootName}. The candidate reported an audio issue. Say "Sorry about that, let me repeat" and repeat: "${lastQ.substring(0, 200)}". Stay in interviewer character. DO NOT ask new questions.` };
     } else if (session.memory) {
       const memoryCtx = buildMemoryContext(session);
       if (memoryCtx) activeMessages.push({ role: 'system', content: memoryCtx });
