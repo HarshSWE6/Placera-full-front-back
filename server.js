@@ -96,8 +96,11 @@ const GROQ_KEYS = [
 ].filter(Boolean);
 
 if (GROQ_KEYS.length === 0) {
-  console.error("❌ CRITICAL: No GROQ API keys found in .env!");
+  console.error("❌ CRITICAL: No GROQ API keys found! Set GROQ_API_KEY_1 in environment variables.");
+} else {
+  console.log(`✅ Groq keys loaded: ${GROQ_KEYS.length} key(s) [${GROQ_KEYS.map((k,i) => `Key${i+1}:${k.substring(0,8)}...`).join(', ')}]`);
 }
+console.log(`🔧 ENV check: ELEVENLABS_API_KEY=${process.env.ELEVENLABS_API_KEY ? 'SET' : 'MISSING'}, ELEVENLABS_VOICE_ID=${process.env.ELEVENLABS_VOICE_ID ? 'SET' : 'MISSING'}, PORT=${process.env.PORT || '3000(default)'}`);
 
 let currentKeyIndex = 0;
 
