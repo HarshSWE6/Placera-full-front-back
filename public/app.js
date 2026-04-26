@@ -313,9 +313,12 @@ async function startVoiceInput() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error("Microphone API not supported on this browser.");
         }
+
+        // Use a single getUserMedia stream for both analyser and recorder
+        const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000 } });
         
+        // Set up duplex analyser from the same stream (only once)
         if (!duplexAnalyser) {
-            const s = await navigator.mediaDevices.getUserMedia({ audio: true });
             const ctx = new (window.AudioContext || window.webkitAudioContext)();
             const src = ctx.createMediaStreamSource(s);
             duplexAnalyser = ctx.createAnalyser(); src.connect(duplexAnalyser);
@@ -323,7 +326,6 @@ async function startVoiceInput() {
             requestAnimationFrame(monitorDuplex);
         }
 
-        const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000 } });
         isListening = true; audioChunks = []; voiceActivityDetected = false;
         if (currentSource) { try { currentSource.stop(); } catch(e) {} currentSource = null; }
         window.speechSynthesis && window.speechSynthesis.cancel();
@@ -343,7 +345,7 @@ async function startVoiceInput() {
             if (voiceActivityDetected && audioChunks.length > 0) await transcribeAndSend();
             else { resetAnswerBtn(); addLog('No speech detected — try again', 'warn'); }
         };
-        mediaRecorder.start(100);
+        mediaRecorder.start(250); // 250ms timeslice for reliable chunks
         // No auto-timeout — user controls with mute button
     } catch (err) {
         console.error("Mic error:", err);

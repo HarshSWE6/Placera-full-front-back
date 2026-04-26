@@ -956,19 +956,17 @@
     <!-- Screen 4: SCORECARD                            -->
     <!-- ═══════════════════════════════════════════════ -->
     <div id="scorecardScreen" class="screen">
-      <div class="size-full overflow-y-auto bg-gradient-to-br from-slate-50 to-blue-50 text-slate-900" style="font-family: var(--font-body);">
-        <nav class="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-slate-200">
-          <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <div class="logo" style="font-size:24px; color:#0f172a; text-shadow:none;">Place<em style="color:#2563eb;">ra</em></div>
-            </div>
-            <div class="flex items-center gap-4">
-              <span class="px-3 py-1 bg-green-100 text-green-700 text-xs font-bold rounded-full">RESULTS</span>
-            </div>
+      <div style="width:100%; height:100%; overflow-y:auto; background:linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%); color:#0f172a; font-family:'Outfit','Inter',sans-serif;">
+        <nav style="position:sticky; top:0; z-index:50; background:rgba(255,255,255,0.85); backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); border-bottom:1px solid #e2e8f0; padding:16px 32px; display:flex; align-items:center; justify-content:space-between;">
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="font-family:'Outfit','Inter',sans-serif; font-size:24px; font-weight:800; background:linear-gradient(135deg,#3b82f6,#6366f1,#8b5cf6); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">Placera</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <span style="padding:5px 14px; background:rgba(22,163,74,0.1); color:#16a34a; font-size:11px; font-weight:700; border-radius:100px; letter-spacing:1px;">RESULTS</span>
           </div>
         </nav>
-        <div class="py-12 px-6">
-          <div class="max-w-4xl mx-auto" id="scorecardMain"></div>
+        <div style="padding:48px 24px;">
+          <div style="max-width:860px; margin:0 auto;" id="scorecardMain"></div>
         </div>
       </div>
     </div>
