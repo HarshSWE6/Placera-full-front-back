@@ -317,16 +317,35 @@ async function startVoiceInput() {
             throw new Error("Microphone API not supported on this browser.");
         }
 
-        // Get microphone stream with relaxed constraints
-        const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Get microphone stream with ENHANCED sensitivity constraints
+        const s = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+                channelCount: 1,
+                sampleRate: { ideal: 16000 },   // Whisper works best at 16kHz
+                sampleSize: { ideal: 16 },
+            }
+        });
         activeStream = s;
         console.log('[VOICE] Got microphone stream, tracks:', s.getAudioTracks().length, 'track state:', s.getAudioTracks()[0]?.readyState);
         
-        // Set up duplex analyser from the same stream (only once)
+        // ── BOOST: Amplify mic signal for better transcription ──
+        const boostCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const micSource = boostCtx.createMediaStreamSource(s);
+        const gainNode = boostCtx.createGain();
+        gainNode.gain.value = 1.8; // 80% louder — captures soft voices better
+        const boostDest = boostCtx.createMediaStreamDestination();
+        micSource.connect(gainNode);
+        gainNode.connect(boostDest);
+        const boostedStream = boostDest.stream;
+        console.log('[VOICE] Audio gain boost applied: 1.8x');
+
+        // Set up duplex analyser from the ORIGINAL stream (for voice activity detection)
         if (!duplexAnalyser) {
-            const ctx = new (window.AudioContext || window.webkitAudioContext)();
-            const src = ctx.createMediaStreamSource(s);
-            duplexAnalyser = ctx.createAnalyser(); src.connect(duplexAnalyser);
+            const src = boostCtx.createMediaStreamSource(s);
+            duplexAnalyser = boostCtx.createAnalyser(); src.connect(duplexAnalyser);
             duplexDataArray = new Uint8Array(duplexAnalyser.frequencyBinCount);
             requestAnimationFrame(monitorDuplex);
         }
@@ -349,7 +368,8 @@ async function startVoiceInput() {
         }
         if (!options.mimeType) console.log('[VOICE] No preferred mimeType supported, using browser default');
         
-        mediaRecorder = new MediaRecorder(s, options);
+        // Record from the BOOSTED stream for better transcription
+        mediaRecorder = new MediaRecorder(boostedStream, options);
         console.log('[VOICE] MediaRecorder created, state:', mediaRecorder.state, 'mimeType:', mediaRecorder.mimeType);
         
         mediaRecorder.ondataavailable = (e) => {
@@ -359,6 +379,8 @@ async function startVoiceInput() {
         
         mediaRecorder.onstop = async () => {
             console.log('[VOICE] onstop fired. Chunks collected:', audioChunks.length, 'Total size:', audioChunks.reduce((a, c) => a + c.size, 0));
+            // Close the boost context to free resources
+            try { boostCtx.close(); } catch(e) {}
             // Stop stream tracks AFTER collecting all data
             if (activeStream) {
                 activeStream.getTracks().forEach(t => t.stop());
@@ -379,7 +401,7 @@ async function startVoiceInput() {
         };
         
         mediaRecorder.start(500); // 500ms timeslice — more reliable chunks
-        console.log('[VOICE] Recording started with timeslice 500ms');
+        console.log('[VOICE] Recording started with timeslice 500ms, gain boost active');
     } catch (err) {
         console.error('[VOICE] Mic error:', err);
         micActive = false;

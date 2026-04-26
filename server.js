@@ -423,7 +423,6 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   
   let tempPath = null;
   try {
-    const client = getGroqClient();
     const mimeType = req.file.mimetype || 'audio/webm';
     const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
     
@@ -432,35 +431,45 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     fs.writeFileSync(tempPath, req.file.buffer);
     logMsg(`[TRANSCRIBE] Saved ${req.file.size} bytes as ${tempPath}`);
     
-    const transcription = await client.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
-      model: 'whisper-large-v3-turbo',
-      language: 'en',
-      response_format: 'json'
-    });
+    // Try transcription with key rotation on failure
+    let lastErr = null;
+    const models = ['whisper-large-v3-turbo', 'whisper-large-v3'];
     
-    logMsg(`[TRANSCRIBE] SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
-    res.json({ text: transcription.text || '' });
-  } catch (err) {
-    logMsg(`[TRANSCRIBE] ERROR: ${err.status || 'unknown'} ${err.message || JSON.stringify(err)}`);
-    
-    // Try fallback model
-    try {
-      const retryClient = getGroqClient();
-      if (err.status === 429 && GROQ_KEYS.length > 1) rotateKey();
+    for (let attempt = 0; attempt < GROQ_KEYS.length * models.length; attempt++) {
+      const modelIdx = Math.floor(attempt / GROQ_KEYS.length) % models.length;
+      const model = models[modelIdx];
       
-      const transcription = await retryClient.audio.transcriptions.create({
-        file: fs.createReadStream(tempPath),
-        model: 'whisper-large-v3',
-        language: 'en',
-        response_format: 'json'
-      });
-      logMsg(`[TRANSCRIBE] RETRY SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
-      return res.json({ text: transcription.text || '' });
-    } catch (retryErr) {
-      logMsg(`[TRANSCRIBE] RETRY FAILED: ${retryErr.message}`);
+      try {
+        const client = getGroqClient();
+        logMsg(`[TRANSCRIBE] Attempt ${attempt + 1}: key ${currentKeyIndex + 1}, model ${model}`);
+        
+        const transcription = await client.audio.transcriptions.create({
+          file: fs.createReadStream(tempPath),
+          model,
+          language: 'en',
+          response_format: 'json'
+        });
+        
+        logMsg(`[TRANSCRIBE] SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
+        return res.json({ text: transcription.text || '' });
+      } catch (err) {
+        lastErr = err;
+        const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
+        logMsg(`[TRANSCRIBE] Attempt ${attempt + 1} FAILED: ${err.status || 'unknown'} ${(err.message || '').substring(0, 120)}`);
+        
+        if (isRateLimit && GROQ_KEYS.length > 1) {
+          rotateKey(); // Rotate BEFORE next iteration creates a new client
+        } else if (!isRateLimit) {
+          // Non-rate-limit error on this model — skip to next model
+          break;
+        }
+      }
     }
     
+    logMsg(`[TRANSCRIBE] ALL ATTEMPTS FAILED. Last error: ${lastErr?.status} ${lastErr?.message?.substring(0, 200)}`);
+    res.status(500).json({ error: 'Transcription failed. Please try again.' });
+  } catch (err) {
+    logMsg(`[TRANSCRIBE] CRITICAL ERROR: ${err.message || JSON.stringify(err)}`);
     res.status(500).json({ error: 'Transcription failed. Please try again.' });
   } finally {
     if (tempPath) try { fs.unlinkSync(tempPath); } catch(e) {}
