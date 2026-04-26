@@ -1,6 +1,7 @@
 // ══════════════════════════════════════════════════════════════
-// PLACERA v3.1 — FRONTEND ENGINE (PRODUCTION-READY)
+// PLACERA v3.2 — FRONTEND ENGINE (VOICE FIX BUILD)
 // ══════════════════════════════════════════════════════════════
+console.log('%c[PLACERA] v3.2 Voice Fix Build loaded', 'color: lime; font-size: 14px;');
 
 let sessionId = null, currentCompany = 'Unified', currentRound = 1, currentMode = 'standard';
 let questionCount = 0, maxQuestions = 12, timerInterval = null, seconds = 0;
@@ -435,7 +436,15 @@ async function transcribeAndSend() {
         const data = await res.json();
         console.log('[VOICE] Server response:', JSON.stringify(data));
         
-        if (data.error || !data.text || data.text.trim().length < 2) {
+        if (data.error) {
+            console.error('[VOICE] Server returned error:', data.error);
+            resetAnswerBtn();
+            addLog('Server Error: ' + data.error, 'warn');
+            showToast(data.error, 'error', 5000);
+            return;
+        }
+        
+        if (!data.text || data.text.trim().length < 2) {
             resetAnswerBtn();
             addLog('Could not transcribe — try speaking louder', 'warn');
             showToast('🎙️ Your voice was not clear enough. Please speak louder or closer to the mic.', 'warn', 5000);

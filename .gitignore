@@ -38,3 +38,10 @@ minimal.js
 ui_1.html
 test_resume.txt
 scratch/
+
+# Test/debug scripts
+test_groq.js
+test_transcribe.py
+server_output.log
+transcribe.log
+*.log
