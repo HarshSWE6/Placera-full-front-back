@@ -4,6 +4,13 @@
 // Secured, rate-limited, memory-managed, graceful shutdown
 
 require('dotenv').config();
+
+// ── POLYFILL: File global for Node < 20 (required by Groq SDK on Railway) ──
+if (typeof globalThis.File === 'undefined') {
+  const { File } = require('node:buffer');
+  globalThis.File = File;
+  console.log('🔧 Polyfilled globalThis.File for Node < 20 compatibility');
+}
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -44,6 +51,9 @@ if (!process.env.ELEVENLABS_VOICE_ID) {
 }
 
 const app = express();
+
+// ── TRUST PROXY: Required for Railway/Render/Heroku (reverse proxy) ──
+app.set('trust proxy', 1);
 
 // ── SECURITY MIDDLEWARE ──
 app.use(cors()); // Allow everything
