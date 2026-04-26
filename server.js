@@ -4,6 +4,9 @@
 // Secured, rate-limited, memory-managed, graceful shutdown
 
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const express = require('express');
 const axios = require('axios');
@@ -405,23 +408,48 @@ app.get('/api/health', (req, res) => {
 // ── TRANSCRIBE ──
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No audio file' });
+  let tempPath = null;
   try {
     const client = getGroqClient();
-    const { Blob } = require('buffer');
     const mimeType = req.file.mimetype || 'audio/webm';
-    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
     
-    const audioBlob = new Blob([req.file.buffer], { type: mimeType });
+    // Write buffer to temp file — Groq SDK needs a file stream, not browser File API
+    tempPath = path.join(os.tmpdir(), `placera_audio_${Date.now()}.${ext}`);
+    fs.writeFileSync(tempPath, req.file.buffer);
+    console.log(`[TRANSCRIBE] Audio file: ${req.file.size} bytes, type: ${mimeType}, saved to: ${tempPath}`);
+    
     const transcription = await client.audio.transcriptions.create({
-      file: new File([audioBlob], `audio.${ext}`, { type: mimeType }),
+      file: fs.createReadStream(tempPath),
       model: 'whisper-large-v3-turbo',
       language: 'en',
       response_format: 'json'
     });
-    res.json({ text: transcription.text });
+    
+    console.log(`[TRANSCRIBE] Result: "${(transcription.text || '').substring(0, 80)}"`);
+    res.json({ text: transcription.text || '' });
   } catch (err) {
-    console.error('Transcription error:', err);
+    console.error('[TRANSCRIBE] Error:', err.message || err);
+    // If rate limited, try rotating key and retrying once
+    if (err.status === 429 && GROQ_KEYS.length > 1) {
+      rotateKey();
+      try {
+        const retryClient = getGroqClient();
+        const transcription = await retryClient.audio.transcriptions.create({
+          file: fs.createReadStream(tempPath),
+          model: 'whisper-large-v3-turbo',
+          language: 'en',
+          response_format: 'json'
+        });
+        return res.json({ text: transcription.text || '' });
+      } catch (retryErr) {
+        console.error('[TRANSCRIBE] Retry also failed:', retryErr.message);
+      }
+    }
     res.status(500).json({ error: 'Transcription failed. Please try again.' });
+  } finally {
+    // Clean up temp file
+    if (tempPath) { try { fs.unlinkSync(tempPath); } catch(e) {} }
   }
 });
 
