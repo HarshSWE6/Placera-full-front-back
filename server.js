@@ -447,11 +447,20 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
           file: fs.createReadStream(tempPath),
           model,
           language: 'en',
-          response_format: 'json'
+          response_format: 'json',
+          prompt: 'This is a job interview. The candidate is answering technical and behavioral questions about programming, data structures, algorithms, projects, and work experience.'
         });
         
-        logMsg(`[TRANSCRIBE] SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
-        return res.json({ text: transcription.text || '' });
+        // Filter Whisper hallucinations (empty/dot-only responses)
+        const text = (transcription.text || '').trim();
+        const isHallucination = !text || /^[\s.,!?…]+$/.test(text) || text === 'you' || text === 'Thank you.' || text.length < 2;
+        if (isHallucination) {
+          logMsg(`[TRANSCRIBE] FILTERED hallucination: "${text}" — returning empty`);
+          return res.json({ text: '' });
+        }
+        
+        logMsg(`[TRANSCRIBE] SUCCESS: "${text.substring(0, 100)}"`);
+        return res.json({ text });
       } catch (err) {
         lastErr = err;
         const isRateLimit = err.status === 429 || (err.message && err.message.includes('rate'));
