@@ -416,7 +416,7 @@ app.get('/api/health', (req, res) => {
 
 // ── TRANSCRIBE ──
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  const logMsg = (msg) => { console.log(msg); fs.appendFileSync('transcribe.log', new Date().toISOString() + ' ' + msg + '\n'); };
+  const logMsg = (msg) => { console.log(msg); try { fs.appendFileSync('transcribe.log', new Date().toISOString() + ' ' + msg + '\n'); } catch(e) {} };
   
   logMsg(`[TRANSCRIBE] Request received. File: ${!!req.file}, Size: ${req.file?.size || 0}`);
   if (!req.file) return res.status(400).json({ error: 'No audio file' });
