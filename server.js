@@ -416,52 +416,54 @@ app.get('/api/health', (req, res) => {
 
 // ── TRANSCRIBE ──
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  console.log(`[TRANSCRIBE] Request received. File present: ${!!req.file}, Size: ${req.file?.size || 0} bytes`);
-  if (!req.file) {
-      console.log(`[TRANSCRIBE] No file uploaded`);
-      return res.status(400).json({ error: 'No audio file' });
-  }
+  const logMsg = (msg) => { console.log(msg); fs.appendFileSync('transcribe.log', new Date().toISOString() + ' ' + msg + '\n'); };
+  
+  logMsg(`[TRANSCRIBE] Request received. File: ${!!req.file}, Size: ${req.file?.size || 0}`);
+  if (!req.file) return res.status(400).json({ error: 'No audio file' });
+  
+  let tempPath = null;
   try {
     const client = getGroqClient();
     const mimeType = req.file.mimetype || 'audio/webm';
     const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
     
-    console.log(`[TRANSCRIBE] Audio file: ${req.file.size} bytes, type: ${mimeType}`);
-    
-    // Use Groq SDK's toFile helper to pass buffer directly
-    const { toFile } = require('groq-sdk');
-    const fileObj = await toFile(req.file.buffer, `audio.${ext}`, { type: mimeType });
+    // Write to temp file — most reliable approach for Groq SDK
+    tempPath = path.join(os.tmpdir(), `placera_${Date.now()}.${ext}`);
+    fs.writeFileSync(tempPath, req.file.buffer);
+    logMsg(`[TRANSCRIBE] Saved ${req.file.size} bytes as ${tempPath}`);
     
     const transcription = await client.audio.transcriptions.create({
-      file: fileObj,
+      file: fs.createReadStream(tempPath),
       model: 'whisper-large-v3-turbo',
       language: 'en',
       response_format: 'json'
     });
     
-    console.log(`[TRANSCRIBE] Result: "${(transcription.text || '').substring(0, 80)}"`);
+    logMsg(`[TRANSCRIBE] SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
     res.json({ text: transcription.text || '' });
   } catch (err) {
-    console.error('[TRANSCRIBE] Error:', err.message || err);
-    // If rate limited, try rotating key and retrying once
-    if (err.status === 429 && GROQ_KEYS.length > 1) {
-      rotateKey();
-      try {
-        const retryClient = getGroqClient();
-        const { toFile } = require('groq-sdk');
-        const fileObj = await toFile(req.file.buffer, `audio.webm`, { type: req.file.mimetype || 'audio/webm' });
-        const transcription = await retryClient.audio.transcriptions.create({
-          file: fileObj,
-          model: 'whisper-large-v3-turbo',
-          language: 'en',
-          response_format: 'json'
-        });
-        return res.json({ text: transcription.text || '' });
-      } catch (retryErr) {
-        console.error('[TRANSCRIBE] Retry also failed:', retryErr.message);
-      }
+    logMsg(`[TRANSCRIBE] ERROR: ${err.status || 'unknown'} ${err.message || JSON.stringify(err)}`);
+    
+    // Try fallback model
+    try {
+      const retryClient = getGroqClient();
+      if (err.status === 429 && GROQ_KEYS.length > 1) rotateKey();
+      
+      const transcription = await retryClient.audio.transcriptions.create({
+        file: fs.createReadStream(tempPath),
+        model: 'whisper-large-v3',
+        language: 'en',
+        response_format: 'json'
+      });
+      logMsg(`[TRANSCRIBE] RETRY SUCCESS: "${(transcription.text || '').substring(0, 100)}"`);
+      return res.json({ text: transcription.text || '' });
+    } catch (retryErr) {
+      logMsg(`[TRANSCRIBE] RETRY FAILED: ${retryErr.message}`);
     }
+    
     res.status(500).json({ error: 'Transcription failed. Please try again.' });
+  } finally {
+    if (tempPath) try { fs.unlinkSync(tempPath); } catch(e) {}
   }
 });
 
