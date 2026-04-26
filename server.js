@@ -407,20 +407,24 @@ app.get('/api/health', (req, res) => {
 
 // ── TRANSCRIBE ──
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No audio file' });
-  let tempPath = null;
+  console.log(`[TRANSCRIBE] Request received. Body keys:`, Object.keys(req.body), `File present:`, !!req.file);
+  if (!req.file || req.file.size < 1000) {
+      console.log(`[TRANSCRIBE] Request failed: No valid audio file`);
+      return res.status(400).json({ error: 'No audio file or file too small' });
+  }
   try {
     const client = getGroqClient();
     const mimeType = req.file.mimetype || 'audio/webm';
     const ext = mimeType.includes('mp4') ? 'mp4' : mimeType.includes('ogg') ? 'ogg' : 'webm';
     
-    // Write buffer to temp file — Groq SDK needs a file stream, not browser File API
-    tempPath = path.join(os.tmpdir(), `placera_audio_${Date.now()}.${ext}`);
-    fs.writeFileSync(tempPath, req.file.buffer);
-    console.log(`[TRANSCRIBE] Audio file: ${req.file.size} bytes, type: ${mimeType}, saved to: ${tempPath}`);
+    console.log(`[TRANSCRIBE] Audio file: ${req.file.size} bytes, type: ${mimeType}`);
+    
+    // Use Groq SDK's toFile helper to pass buffer directly
+    const { toFile } = require('groq-sdk');
+    const fileObj = await toFile(req.file.buffer, `audio.${ext}`, { type: mimeType });
     
     const transcription = await client.audio.transcriptions.create({
-      file: fs.createReadStream(tempPath),
+      file: fileObj,
       model: 'whisper-large-v3-turbo',
       language: 'en',
       response_format: 'json'
@@ -435,8 +439,10 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       rotateKey();
       try {
         const retryClient = getGroqClient();
+        const { toFile } = require('groq-sdk');
+        const fileObj = await toFile(req.file.buffer, `audio.webm`, { type: req.file.mimetype || 'audio/webm' });
         const transcription = await retryClient.audio.transcriptions.create({
-          file: fs.createReadStream(tempPath),
+          file: fileObj,
           model: 'whisper-large-v3-turbo',
           language: 'en',
           response_format: 'json'
@@ -447,9 +453,6 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
       }
     }
     res.status(500).json({ error: 'Transcription failed. Please try again.' });
-  } finally {
-    // Clean up temp file
-    if (tempPath) { try { fs.unlinkSync(tempPath); } catch(e) {} }
   }
 });
 

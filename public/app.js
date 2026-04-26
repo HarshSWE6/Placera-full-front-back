@@ -315,7 +315,8 @@ async function startVoiceInput() {
         }
 
         // Use a single getUserMedia stream for both analyser and recorder
-        const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000 } });
+        // Relaxing constraints: strict sampleRate can cause silent streams on some Windows hardware
+        const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
         
         // Set up duplex analyser from the same stream (only once)
         if (!duplexAnalyser) {
