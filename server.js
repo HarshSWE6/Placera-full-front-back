@@ -190,6 +190,15 @@ async function aiChat(params) {
 }
 
 app.use(express.json({ limit: '1mb' }));
+// Force no-cache on JS/CSS so browser always loads latest code
+app.use((req, res, next) => {
+  if (req.url.endsWith('.js') || req.url.endsWith('.css')) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
 app.use(express.static('public'));
 
 // ══════════════════════════════════════════════════════════════
