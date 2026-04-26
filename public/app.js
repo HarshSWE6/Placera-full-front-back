@@ -307,6 +307,8 @@ function toggleMic() {
 function startAnswer() { if (!micActive) toggleMic(); }
 function stopAnswer() { if (micActive) toggleMic(); }
 
+let activeStream = null; // Keep stream reference at module level
+
 async function startVoiceInput() {
     if (!interviewActive || isListening) return;
     try {
@@ -314,9 +316,10 @@ async function startVoiceInput() {
             throw new Error("Microphone API not supported on this browser.");
         }
 
-        // Use a single getUserMedia stream for both analyser and recorder
-        // Relaxing constraints: strict sampleRate can cause silent streams on some Windows hardware
-        const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        // Get microphone stream with relaxed constraints
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+        activeStream = s;
+        console.log('[VOICE] Got microphone stream, tracks:', s.getAudioTracks().length, 'track state:', s.getAudioTracks()[0]?.readyState);
         
         // Set up duplex analyser from the same stream (only once)
         if (!duplexAnalyser) {
@@ -327,29 +330,57 @@ async function startVoiceInput() {
             requestAnimationFrame(monitorDuplex);
         }
 
-        isListening = true; audioChunks = []; voiceActivityDetected = false;
+        isListening = true; audioChunks = [];
         if (currentSource) { try { currentSource.stop(); } catch(e) {} currentSource = null; }
         window.speechSynthesis && window.speechSynthesis.cancel();
         setWaveLbl('Listening... click Mute when done'); setAgentPill('taking notes...');
         addLog('Mic unmuted — listening...', 'info');
         
-        // Fix for iOS Safari: Find a supported mimeType
-        let options = { mimeType: 'audio/webm' };
-        if (typeof MediaRecorder !== 'undefined' && !MediaRecorder.isTypeSupported('audio/webm')) {
-            options = MediaRecorder.isTypeSupported('audio/mp4') ? { mimeType: 'audio/mp4' } : {};
+        // Find a supported mimeType
+        let options = {};
+        const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+        for (const mime of mimeTypes) {
+            if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
+                options = { mimeType: mime };
+                console.log('[VOICE] Using mimeType:', mime);
+                break;
+            }
         }
+        if (!options.mimeType) console.log('[VOICE] No preferred mimeType supported, using browser default');
         
         mediaRecorder = new MediaRecorder(s, options);
-        mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) { audioChunks.push(e.data); voiceActivityDetected = true; } };
-        mediaRecorder.onstop = async () => {
-            s.getTracks().forEach(t => t.stop());
-            if (voiceActivityDetected && audioChunks.length > 0) await transcribeAndSend();
-            else { resetAnswerBtn(); addLog('No speech detected — try again', 'warn'); }
+        console.log('[VOICE] MediaRecorder created, state:', mediaRecorder.state, 'mimeType:', mediaRecorder.mimeType);
+        
+        mediaRecorder.ondataavailable = (e) => {
+            console.log('[VOICE] ondataavailable:', e.data.size, 'bytes');
+            if (e.data.size > 0) audioChunks.push(e.data);
         };
-        mediaRecorder.start(250); // 250ms timeslice for reliable chunks
-        // No auto-timeout — user controls with mute button
+        
+        mediaRecorder.onstop = async () => {
+            console.log('[VOICE] onstop fired. Chunks collected:', audioChunks.length, 'Total size:', audioChunks.reduce((a, c) => a + c.size, 0));
+            // Stop stream tracks AFTER collecting all data
+            if (activeStream) {
+                activeStream.getTracks().forEach(t => t.stop());
+                activeStream = null;
+            }
+            // Always try to transcribe if we have ANY chunks
+            if (audioChunks.length > 0) {
+                await transcribeAndSend();
+            } else {
+                resetAnswerBtn();
+                addLog('No audio data captured — check your microphone', 'warn');
+                showToast('No audio captured. Please check your microphone permissions.', 'warn');
+            }
+        };
+        
+        mediaRecorder.onerror = (e) => {
+            console.error('[VOICE] MediaRecorder error:', e.error);
+        };
+        
+        mediaRecorder.start(500); // 500ms timeslice — more reliable chunks
+        console.log('[VOICE] Recording started with timeslice 500ms');
     } catch (err) {
-        console.error("Mic error:", err);
+        console.error('[VOICE] Mic error:', err);
         micActive = false;
         resetAnswerBtn();
         addLog('Mic access denied — type your answer instead', 'warn');
@@ -359,42 +390,65 @@ async function startVoiceInput() {
 }
 
 function stopVoiceInput() {
-    if (!isListening) return; isListening = false; clearTimeout(silenceTimer);
+    if (!isListening) return;
+    isListening = false;
+    clearTimeout(silenceTimer);
     micActive = false;
     resetAnswerBtn();
     setWaveLbl('Transcribing...');
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    console.log('[VOICE] Stopping recorder. State:', mediaRecorder?.state, 'Chunks so far:', audioChunks.length);
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+        // Request any buffered data before stopping
+        try { mediaRecorder.requestData(); } catch(e) { console.log('[VOICE] requestData not supported'); }
+        // Small delay to let the final ondataavailable fire
+        setTimeout(() => {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+                console.log('[VOICE] Recorder stopped');
+            }
+        }, 100);
+    } else if (mediaRecorder && mediaRecorder.state === 'paused') {
+        mediaRecorder.stop();
+    }
 }
 
 async function transcribeAndSend() {
     try {
         const audioType = mediaRecorder && mediaRecorder.mimeType ? mediaRecorder.mimeType : 'audio/webm';
         const audioBlob = new Blob(audioChunks, { type: audioType });
-        if (audioBlob.size < 100) {
+        console.log('[VOICE] Transcribing blob:', audioBlob.size, 'bytes, type:', audioType, 'chunks:', audioChunks.length);
+        
+        if (audioBlob.size < 500) {
+            console.log('[VOICE] Blob too small:', audioBlob.size, '— likely just container headers');
             resetAnswerBtn();
-            addLog('Too short — speak more clearly', 'warn');
-            showToast('🎙️ You are not audible. Please speak louder and try again.', 'warn', 5000);
-            setQText('I\'m sorry, you\'re not audible. Could you please repeat that?');
-            speakText('I\'m sorry, you\'re not audible. Could you please repeat your answer?', 'Unified', currentRound);
+            addLog('Recording too short — please speak for at least 1-2 seconds', 'warn');
+            showToast('🎙️ Please speak for a bit longer and try again.', 'warn', 5000);
             return;
         }
-        const ext = audioType.includes('mp4') ? 'mp4' : 'webm';
-        const formData = new FormData(); formData.append('audio', audioBlob, 'answer.' + ext);
+        
+        const ext = audioType.includes('mp4') ? 'mp4' : audioType.includes('ogg') ? 'ogg' : 'webm';
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'answer.' + ext);
+        
+        console.log('[VOICE] Sending to /api/transcribe...');
         const res = await fetch('/api/transcribe', { method: 'POST', body: formData });
         const data = await res.json();
-        if (data.error || !data.text || data.text.trim().length < 3) {
+        console.log('[VOICE] Server response:', JSON.stringify(data));
+        
+        if (data.error || !data.text || data.text.trim().length < 2) {
             resetAnswerBtn();
             addLog('Could not transcribe — try speaking louder', 'warn');
-            showToast('🎙️ Your voice was not clear enough. Please speak louder or move closer to the mic.', 'warn', 5000);
-            setQText('I couldn\'t hear you clearly. Could you please repeat that?');
-            speakText('I couldn\'t hear you clearly. Could you please repeat your answer?', 'Unified', currentRound);
+            showToast('🎙️ Your voice was not clear enough. Please speak louder or closer to the mic.', 'warn', 5000);
             return;
         }
         const transcribedText = data.text.trim();
-        addLog('You said: "' + transcribedText.substring(0, 50) + '..."', 'good');
-        resetAnswerBtn(); await sendAnswer(transcribedText);
+        addLog('You said: "' + transcribedText.substring(0, 80) + (transcribedText.length > 80 ? '...' : '') + '"', 'good');
+        resetAnswerBtn();
+        await sendAnswer(transcribedText);
     } catch (err) {
-        resetAnswerBtn(); addLog('Transcription failed — type your answer', 'warn');
+        console.error('[VOICE] Transcription error:', err);
+        resetAnswerBtn();
+        addLog('Transcription failed — type your answer', 'warn');
         showToast('Transcription failed. Please type your answer below.', 'warn');
         document.getElementById('textAnswerInput')?.focus();
     }

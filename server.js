@@ -407,10 +407,10 @@ app.get('/api/health', (req, res) => {
 
 // ── TRANSCRIBE ──
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
-  console.log(`[TRANSCRIBE] Request received. Body keys:`, Object.keys(req.body), `File present:`, !!req.file);
-  if (!req.file || req.file.size < 1000) {
-      console.log(`[TRANSCRIBE] Request failed: No valid audio file`);
-      return res.status(400).json({ error: 'No audio file or file too small' });
+  console.log(`[TRANSCRIBE] Request received. File present: ${!!req.file}, Size: ${req.file?.size || 0} bytes`);
+  if (!req.file) {
+      console.log(`[TRANSCRIBE] No file uploaded`);
+      return res.status(400).json({ error: 'No audio file' });
   }
   try {
     const client = getGroqClient();
